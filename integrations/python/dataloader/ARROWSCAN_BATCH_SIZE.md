@@ -153,20 +153,43 @@ uv run pytest tests/test_ray_arrowscan_oom.py -s -m slow
 
 First run generates the file (~1-2 minutes), subsequent runs use cache at `/tmp/arrowscan_oom_data/data.orc`.
 
----
+### Actual Test Output
 
-## Implications for Distributed Readers
+```
+tests/test_ray_arrowscan_oom.py
+  Reusing cached ORC file: /tmp/arrowscan_oom_data/data.orc
+2026-02-09 15:39:26,100 INFO worker.py:1998 -- Started a local Ray instance.
+(read_orc_via_arrowscan pid=92344) [WATCHDOG] RSS:   142.2 MB  (limit: 1024 MB)
+(read_orc_via_arrowscan pid=92344) [WORKER] Starting ArrowScan of 3783.8 MB file...
+(read_orc_via_arrowscan pid=92344) [WATCHDOG] RSS:   212.0 MB  (limit: 1024 MB)
+(read_orc_via_arrowscan pid=92344) [WATCHDOG] RSS:   276.8 MB  (limit: 1024 MB)
+(read_orc_via_arrowscan pid=92344) [WATCHDOG] RSS:   341.6 MB  (limit: 1024 MB)
+(read_orc_via_arrowscan pid=92344) [WATCHDOG] RSS:   406.0 MB  (limit: 1024 MB)
+(read_orc_via_arrowscan pid=92344) [WATCHDOG] RSS:   468.5 MB  (limit: 1024 MB)
+(read_orc_via_arrowscan pid=92344) [WATCHDOG] RSS:   526.6 MB  (limit: 1024 MB)
+(read_orc_via_arrowscan pid=92344) [WATCHDOG] RSS:   595.3 MB  (limit: 1024 MB)
+(read_orc_via_arrowscan pid=92344) [WATCHDOG] RSS:   662.1 MB  (limit: 1024 MB)
+(read_orc_via_arrowscan pid=92344) [WATCHDOG] RSS:   726.4 MB  (limit: 1024 MB)
+(read_orc_via_arrowscan pid=92344) [WATCHDOG] RSS:   792.9 MB  (limit: 1024 MB)
+(read_orc_via_arrowscan pid=92344) [WATCHDOG] RSS:   858.1 MB  (limit: 1024 MB)
+(read_orc_via_arrowscan pid=92344) [WATCHDOG] RSS:   922.0 MB  (limit: 1024 MB)
+(read_orc_via_arrowscan pid=92344) [WATCHDOG] RSS:   988.6 MB  (limit: 1024 MB)
+(read_orc_via_arrowscan pid=92344) [WATCHDOG] RSS:  1052.7 MB  (limit: 1024 MB)
+(read_orc_via_arrowscan pid=92344) [WATCHDOG] MEMORY LIMIT EXCEEDED! Injecting MemoryError...
 
-In distributed compute (Ray, Spark, Dask), workers have bounded memory (typically 4-16 GB). ArrowScan's behavior means:
+============================================================
+  Ray ArrowScan OOM Experiment
+============================================================
+  ORC file size on disk:    3783.8 MB
+  Worker memory limit:      1024 MB
+  Row count:                150,000,000
+  ORC stripe size:          100 rows/stripe
+  Outcome:                  OOM (MemoryError)
+  Peak RSS at crash:        1052.7 MB
+============================================================
+  → ArrowScan materialized the full file, exceeding worker memory.
+  → A streaming reader would process batches within bounded memory.
+============================================================
+```
 
-1. Each data file must fit entirely in worker RAM
-2. No backpressure: reading cannot pause while downstream processes
-3. Memory is wasted: all batches are held even if consumer processes one at a time
-
----
-
-## Options
-
-1. **Patch PyIceberg** to forward `batch_size` to [`Scanner.from_fragment()`](https://github.com/apache/iceberg-python/blob/pyiceberg-0.11.0rc2/pyiceberg/io/pyarrow.py#L1615-L1622) and remove the [`list()` materialization](https://github.com/apache/iceberg-python/blob/pyiceberg-0.11.0rc2/pyiceberg/io/pyarrow.py#L1782-L1786) in `batches_for_task`. Both changes are required for streaming to work.
-2. **Bypass ArrowScan entirely** and use PyArrow readers directly: [`pq.ParquetFile.iter_batches(batch_size=N)`](https://arrow.apache.org/docs/python/generated/pyarrow.parquet.ParquetFile.html#pyarrow.parquet.ParquetFile.iter_batches) for Parquet, [`orc.ORCFile.read_stripe(i)`](https://arrow.apache.org/docs/python/generated/pyarrow.orc.ORCFile.html#pyarrow.orc.ORCFile.read_stripe) for ORC.
-3. **File upstream feature request** on the [PyIceberg project](https://github.com/apache/iceberg-python/issues).
+The logs show RSS climbing steadily from 142 MB to 1052 MB before the watchdog triggers OOM. No batch was ever yielded.
