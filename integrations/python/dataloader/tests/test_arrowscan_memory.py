@@ -6,7 +6,9 @@ streaming iteration (delete-as-you-go) and full materialization (list()).
 
 import os
 from pathlib import Path
+from typing import NamedTuple
 
+import numpy as np
 import pyarrow as pa
 import pyarrow.orc as orc
 import pyarrow.parquet as pq
@@ -23,6 +25,18 @@ from pyiceberg.types import IntegerType, LongType, NestedField, StringType
 
 NUM_ROWS = 200_000
 ROW_GROUP_SIZE = 10_000  # Parquet row-group / ORC stripe target
+SCALING_SIZES = [500_000, 1_000_000, 2_000_000, 10_000_000]
+
+
+class _SizeResult(NamedTuple):
+    num_rows: int
+    file_size_mb: float
+    streaming_peak_mb: float
+    materialized_mb: float
+    ratio: float
+    streaming_bytes_per_row: float
+    materialized_bytes_per_row: float
+
 
 ICEBERG_SCHEMA = Schema(
     NestedField(field_id=1, name="id", field_type=LongType(), required=True),
@@ -32,16 +46,18 @@ ICEBERG_SCHEMA = Schema(
 )
 
 
-def _make_table() -> pa.Table:
-    """Generate a 200K-row, 4-column PyArrow table."""
-    import random
-    import string
+def _make_table(num_rows: int = NUM_ROWS) -> pa.Table:
+    """Generate an N-row, 4-column PyArrow table using numpy for speed."""
+    rng = np.random.default_rng(42)
+    ids = np.arange(num_rows, dtype=np.int64)
+    value_a = rng.integers(0, 1_000_000, size=num_rows, dtype=np.int32)
+    value_b = rng.integers(0, 1_000_000, size=num_rows, dtype=np.int32)
 
-    rng = random.Random(42)
-    ids = list(range(NUM_ROWS))
-    value_a = [rng.randint(0, 1_000_000) for _ in range(NUM_ROWS)]
-    value_b = [rng.randint(0, 1_000_000) for _ in range(NUM_ROWS)]
-    labels = ["".join(rng.choices(string.ascii_lowercase, k=20)) for _ in range(NUM_ROWS)]
+    # Generate a pool of unique 20-char strings, then tile to fill num_rows.
+    pool_size = min(1000, num_rows)
+    pool = np.array([bytes(rng.integers(97, 123, size=20, dtype=np.uint8)).decode() for _ in range(pool_size)])
+    labels = np.tile(pool, (num_rows + pool_size - 1) // pool_size)[:num_rows]
+
     return pa.table(
         {
             "id": pa.array(ids, type=pa.int64()),
@@ -82,7 +98,7 @@ def _write_file(tmp_path: Path, table: pa.Table, file_format: str) -> tuple[str,
 
 
 def _make_arrowscan_and_task(
-    file_path: str, file_format: str, properties: dict[str, str]
+    file_path: str, file_format: str, properties: dict[str, str], record_count: int = NUM_ROWS
 ) -> tuple[ArrowScan, FileScanTask]:
     """Construct an ArrowScan and FileScanTask for a local data file."""
     fmt = FileFormat.PARQUET if file_format == "parquet" else FileFormat.ORC
@@ -101,7 +117,7 @@ def _make_arrowscan_and_task(
         file_path=file_path,
         file_format=fmt,
         partition={},
-        record_count=NUM_ROWS,
+        record_count=record_count,
         file_size_in_bytes=file_size,
     )
     # spec_id is a property backed by _spec_id, which from_args does not populate.
@@ -173,3 +189,87 @@ def test_arrowscan_memory_behavior(tmp_path: Path, file_format: str) -> None:
     # Sanity: we got all the rows back
     assert total_rows == NUM_ROWS
     assert materialized_rows == NUM_ROWS
+
+
+@pytest.mark.parametrize("file_format", ["parquet", "orc"])
+def test_arrowscan_memory_scaling(tmp_path: Path, file_format: str) -> None:
+    """Verify that ArrowScan memory usage scales linearly with file size (constant bytes/row)."""
+    results: list[_SizeResult] = []
+
+    for num_rows in SCALING_SIZES:
+        size_dir = tmp_path / f"size_{num_rows}"
+        size_dir.mkdir()
+
+        table = _make_table(num_rows=num_rows)
+        file_path, properties = _write_file(size_dir, table, file_format)
+        file_size_mb = os.path.getsize(file_path) / 1024 / 1024
+        del table
+
+        # --- Streaming run: iterate and delete each batch ---
+        arrow_scan, task = _make_arrowscan_and_task(file_path, file_format, properties, record_count=num_rows)
+        pa.total_allocated_bytes()  # warm up allocator
+        baseline = pa.total_allocated_bytes()
+        streaming_peak = 0
+
+        for batch in arrow_scan.to_record_batches([task]):
+            current = pa.total_allocated_bytes() - baseline
+            streaming_peak = max(streaming_peak, current)
+            del batch
+
+        # --- Materialized run: load everything into a list ---
+        arrow_scan2, task2 = _make_arrowscan_and_task(file_path, file_format, properties, record_count=num_rows)
+        baseline2 = pa.total_allocated_bytes()
+        all_batches = list(arrow_scan2.to_record_batches([task2]))
+        materialized_total = pa.total_allocated_bytes() - baseline2
+
+        streaming_peak_mb = streaming_peak / 1024 / 1024
+        materialized_mb = materialized_total / 1024 / 1024
+        ratio = streaming_peak / materialized_total if materialized_total > 0 else 0.0
+        streaming_bpr = streaming_peak / num_rows if num_rows > 0 else 0.0
+        materialized_bpr = materialized_total / num_rows if num_rows > 0 else 0.0
+
+        results.append(
+            _SizeResult(
+                num_rows=num_rows,
+                file_size_mb=file_size_mb,
+                streaming_peak_mb=streaming_peak_mb,
+                materialized_mb=materialized_mb,
+                ratio=ratio,
+                streaming_bytes_per_row=streaming_bpr,
+                materialized_bytes_per_row=materialized_bpr,
+            )
+        )
+
+        del all_batches
+
+    # --- Summary table ---
+    print(f"\n{'=' * 100}")
+    print(f"  ArrowScan Memory Scaling — {file_format.upper()}")
+    print(f"{'=' * 100}")
+    print(
+        f"  {'Rows':>12s}  {'File MB':>9s}  {'Stream Peak MB':>15s}  {'Mater. MB':>10s}"
+        f"  {'Ratio':>6s}  {'Stream B/row':>13s}  {'Mater. B/row':>13s}"
+    )
+    for r in results:
+        print(
+            f"  {r.num_rows:>12,d}  {r.file_size_mb:>9.2f}  {r.streaming_peak_mb:>15.2f}  {r.materialized_mb:>10.2f}"
+            f"  {r.ratio:>6.2f}  {r.streaming_bytes_per_row:>13.1f}  {r.materialized_bytes_per_row:>13.1f}"
+        )
+
+    # Assert constant bytes-per-row across sizes (within 30% tolerance).
+    bpr_values = [r.materialized_bytes_per_row for r in results]
+    bpr_min, bpr_max = min(bpr_values), max(bpr_values)
+    bpr_mean = sum(bpr_values) / len(bpr_values)
+    spread = (bpr_max - bpr_min) / bpr_mean if bpr_mean > 0 else 0.0
+
+    if spread < 0.30:
+        print(f"\n  → Conclusion: CONSTANT bytes/row ({bpr_mean:.1f} avg, {spread:.1%} spread) = LINEAR scaling")
+        print("    ArrowScan materializes entire files. Memory management needed at a higher level.")
+    else:
+        print(f"\n  → Conclusion: bytes/row varies ({bpr_min:.1f}–{bpr_max:.1f}, {spread:.1%} spread)")
+    print(f"{'=' * 100}\n")
+
+    assert spread < 0.30, (
+        f"Materialized bytes/row should be roughly constant across sizes, "
+        f"but spread was {spread:.1%} (min={bpr_min:.1f}, max={bpr_max:.1f})"
+    )
