@@ -2,7 +2,7 @@
 
 ## TL;DR
 
-PyIceberg's `ArrowScan` does not expose a `batch_size` parameter. PyArrow's underlying `Scanner.from_fragment()` does accept `batch_size` (default: 131072 rows), but PyIceberg never passes it through. Additionally, `ArrowScan.to_record_batches()` eagerly materializes all batches per file into a list before yielding, so even small batches do not enable streaming. File size must fit in worker RAM.
+PyIceberg's [`ArrowScan`](https://github.com/apache/iceberg-python/blob/pyiceberg-0.11.0rc2/pyiceberg/io/pyarrow.py#L1724) does not expose a `batch_size` parameter. PyArrow's underlying [`Scanner.from_fragment()`](https://arrow.apache.org/docs/python/generated/pyarrow.dataset.Scanner.html) does accept `batch_size` (default: 131072 rows), but PyIceberg [never passes it through](https://github.com/apache/iceberg-python/blob/pyiceberg-0.11.0rc2/pyiceberg/io/pyarrow.py#L1615-L1622). Additionally, [`ArrowScan.to_record_batches()`](https://github.com/apache/iceberg-python/blob/pyiceberg-0.11.0rc2/pyiceberg/io/pyarrow.py#L1759) eagerly [materializes all batches per file into a `list()`](https://github.com/apache/iceberg-python/blob/pyiceberg-0.11.0rc2/pyiceberg/io/pyarrow.py#L1782-L1786) before yielding, so even small batches do not enable streaming. File size must fit in worker RAM.
 
 Tested with PyIceberg 0.11.0, PyArrow 23.0.0.
 
@@ -10,7 +10,7 @@ Tested with PyIceberg 0.11.0, PyArrow 23.0.0.
 
 ## The Gap
 
-PyArrow's `Scanner.from_fragment()` signature includes `batch_size`:
+PyArrow's [`Scanner.from_fragment()`](https://arrow.apache.org/docs/python/generated/pyarrow.dataset.Scanner.html) signature includes `batch_size`:
 
 ```
 Scanner.from_fragment(
@@ -24,7 +24,7 @@ Scanner.from_fragment(
 )
 ```
 
-PyIceberg's `ArrowScan` calls `Scanner.from_fragment()` at `pyiceberg/io/pyarrow.py:1615` without forwarding `batch_size`:
+PyIceberg's `ArrowScan` calls `Scanner.from_fragment()` at [`pyiceberg/io/pyarrow.py:1615`](https://github.com/apache/iceberg-python/blob/pyiceberg-0.11.0rc2/pyiceberg/io/pyarrow.py#L1615-L1622) without forwarding `batch_size`:
 
 ```python
 fragment_scanner = ds.Scanner.from_fragment(
@@ -36,9 +36,9 @@ fragment_scanner = ds.Scanner.from_fragment(
 )
 ```
 
-`ArrowScan.__init__` accepts only four parameters: `table_metadata`, `io`, `projected_schema`, `row_filter`. There is no scan option, read option, or property-based mechanism to control batch size.
+[`ArrowScan.__init__`](https://github.com/apache/iceberg-python/blob/pyiceberg-0.11.0rc2/pyiceberg/io/pyarrow.py#L1724) accepts only four parameters: `table_metadata`, `io`, `projected_schema`, `row_filter`. There is no scan option, read option, or property-based mechanism to control batch size.
 
-Even if batch_size were forwarded, it would not help. `to_record_batches()` at line 1782-1786 materializes each task's batches into a `list()`:
+Even if `batch_size` were forwarded, it would not help. [`to_record_batches()`](https://github.com/apache/iceberg-python/blob/pyiceberg-0.11.0rc2/pyiceberg/io/pyarrow.py#L1759) at [line 1782-1786](https://github.com/apache/iceberg-python/blob/pyiceberg-0.11.0rc2/pyiceberg/io/pyarrow.py#L1782-L1786) materializes each task's batches into a `list()`:
 
 ```python
 def batches_for_task(task: FileScanTask) -> list[pa.RecordBatch]:
@@ -53,6 +53,8 @@ This converts the lazy batch iterator into a fully materialized list before any 
 ## Experiment 1: Memory Behavior (200K rows)
 
 Tests whether "streaming" iteration (delete each batch after processing) uses less memory than full materialization.
+
+Source: [`test_arrowscan_memory.py::test_arrowscan_memory_behavior`](tests/test_arrowscan_memory.py)
 
 ### Setup
 
@@ -93,6 +95,8 @@ Streaming peak equals materialized total in both formats. Ratio is 1.00x. ArrowS
 
 Tests whether memory scales linearly with row count (confirming full materialization, not streaming).
 
+Source: [`test_arrowscan_memory.py::test_arrowscan_memory_scaling`](tests/test_arrowscan_memory.py)
+
 ### Results
 
 ```
@@ -123,11 +127,13 @@ Memory usage is 40 bytes/row regardless of file size. Streaming peak never dips 
 
 Tests whether ArrowScan causes OOM in a memory-bounded distributed worker.
 
+Source: [`test_ray_arrowscan_oom.py::test_ray_worker_oom_large_orc`](tests/test_ray_arrowscan_oom.py)
+
 ### Setup
 
 - 150 million rows, ~3.8 GB uncompressed ORC file
 - 100 rows per ORC stripe (1.5 million stripes, ~4 KB each)
-- Ray worker with 1 GB memory limit enforced via RSS watchdog thread
+- Ray worker with 1 GB memory limit enforced via [RSS watchdog thread](tests/test_ray_arrowscan_oom.py#L217-L234)
 - Watchdog polls every 50ms, injects MemoryError when RSS exceeds 1 GB
 
 ### Observed Behavior
@@ -161,6 +167,6 @@ In distributed compute (Ray, Spark, Dask), workers have bounded memory (typicall
 
 ## Options
 
-1. **Patch PyIceberg** to forward `batch_size` to `Scanner.from_fragment()` and remove the `list()` materialization in `batches_for_task`. Both changes are required for streaming to work.
-2. **Bypass ArrowScan entirely** and use PyArrow readers directly: `pq.ParquetFile.iter_batches(batch_size=N)` for Parquet, `orc.ORCFile.read_stripe(i)` for ORC.
-3. **File upstream feature request** on the PyIceberg project.
+1. **Patch PyIceberg** to forward `batch_size` to [`Scanner.from_fragment()`](https://github.com/apache/iceberg-python/blob/pyiceberg-0.11.0rc2/pyiceberg/io/pyarrow.py#L1615-L1622) and remove the [`list()` materialization](https://github.com/apache/iceberg-python/blob/pyiceberg-0.11.0rc2/pyiceberg/io/pyarrow.py#L1782-L1786) in `batches_for_task`. Both changes are required for streaming to work.
+2. **Bypass ArrowScan entirely** and use PyArrow readers directly: [`pq.ParquetFile.iter_batches(batch_size=N)`](https://arrow.apache.org/docs/python/generated/pyarrow.parquet.ParquetFile.html#pyarrow.parquet.ParquetFile.iter_batches) for Parquet, [`orc.ORCFile.read_stripe(i)`](https://arrow.apache.org/docs/python/generated/pyarrow.orc.ORCFile.html#pyarrow.orc.ORCFile.read_stripe) for ORC.
+3. **File upstream feature request** on the [PyIceberg project](https://github.com/apache/iceberg-python/issues).
