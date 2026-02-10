@@ -148,7 +148,7 @@ def test_arrowscan_memory_behavior(tmp_path: Path, file_format: str) -> None:
     batch_count = 0
     total_rows = 0
 
-    for batch in arrow_scan.to_record_batches([task]):
+    for batch in arrow_scan.to_record_batches_streaming([task], batch_size=10_000):
         current = pa.total_allocated_bytes() - baseline
         streaming_peak = max(streaming_peak, current)
         total_rows += batch.num_rows
@@ -160,7 +160,7 @@ def test_arrowscan_memory_behavior(tmp_path: Path, file_format: str) -> None:
     # --- Materialized run: load everything into a list ---
     arrow_scan2, task2 = _make_arrowscan_and_task(file_path, file_format, properties)
     baseline2 = pa.total_allocated_bytes()
-    all_batches = list(arrow_scan2.to_record_batches([task2]))
+    all_batches = list(arrow_scan2.to_record_batches_streaming([task2], batch_size=10_000))
     materialized_total = pa.total_allocated_bytes() - baseline2
     materialized_rows = sum(b.num_rows for b in all_batches)
 
@@ -211,7 +211,7 @@ def test_arrowscan_memory_scaling(tmp_path: Path, file_format: str) -> None:
         baseline = pa.total_allocated_bytes()
         streaming_peak = 0
 
-        for batch in arrow_scan.to_record_batches([task]):
+        for batch in arrow_scan.to_record_batches_streaming([task], batch_size=10_000):
             current = pa.total_allocated_bytes() - baseline
             streaming_peak = max(streaming_peak, current)
             del batch
@@ -219,7 +219,7 @@ def test_arrowscan_memory_scaling(tmp_path: Path, file_format: str) -> None:
         # --- Materialized run: load everything into a list ---
         arrow_scan2, task2 = _make_arrowscan_and_task(file_path, file_format, properties, record_count=num_rows)
         baseline2 = pa.total_allocated_bytes()
-        all_batches = list(arrow_scan2.to_record_batches([task2]))
+        all_batches = list(arrow_scan2.to_record_batches_streaming([task2], batch_size=10_000))
         materialized_total = pa.total_allocated_bytes() - baseline2
 
         streaming_peak_mb = streaming_peak / 1024 / 1024
