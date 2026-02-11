@@ -1,14 +1,16 @@
-.PHONY: help sync clean lint format format-check check test all
+.PHONY: help sync clean lint format format-check check test test-quiet test-slow all
 
 help:
 	@echo "Available commands:"
-	@echo "  make sync   - Sync dependencies using uv"
-	@echo "  make lint   - Run ruff linter"
-	@echo "  make format - Format code with ruff"
-	@echo "  make check  - Run all checks (lint + format check)"
-	@echo "  make test   - Run tests with pytest"
-	@echo "  make all    - Run all checks and tests"
-	@echo "  make clean  - Clean build artifacts"
+	@echo "  make sync       - Sync dependencies using uv"
+	@echo "  make lint       - Run ruff linter"
+	@echo "  make format     - Format code with ruff"
+	@echo "  make check      - Run all checks (lint + format check)"
+	@echo "  make test       - Run tests with pytest (shows output with -s)"
+	@echo "  make test-quiet - Run tests without output"
+	@echo "  make test-slow  - Run all tests including slow ones (with output)"
+	@echo "  make all        - Run all checks and tests"
+	@echo "  make clean      - Clean build artifacts"
 
 sync:
 	uv sync --all-extras
@@ -25,7 +27,13 @@ format-check:
 check: lint format-check
 
 test:
+	uv run pytest -s
+
+test-quiet:
 	uv run pytest
+
+test-slow:
+	uv run pytest -s -m slow
 
 all: check test
 
