@@ -26,3 +26,4 @@ class TableScanContext:
     io: FileIO
     projected_schema: Schema
     row_filter: BooleanExpression = AlwaysTrue()
+    table_name: str = ""
