@@ -23,14 +23,9 @@ attribute (e.g. ``m.loader``).
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
-from opentelemetry.metrics import get_meter
+from opentelemetry.metrics import MeterProvider, get_meter
 
 from openhouse.dataloader.metrics._split import SplitMetrics
-
-if TYPE_CHECKING:
-    from opentelemetry.metrics import MeterProvider
 
 METER_NAME = "openhouse.dataloader"
 
