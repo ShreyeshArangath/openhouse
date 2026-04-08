@@ -4,6 +4,7 @@ import hashlib
 from collections.abc import Iterator, Mapping
 from types import MappingProxyType
 
+import pyarrow as pa
 from datafusion.context import SessionContext
 from pyarrow import RecordBatch
 from pyiceberg.io.pyarrow import ArrowScan
@@ -36,10 +37,38 @@ def _create_transform_session(
     return session
 
 
+def _coerce_timestamps_for_datafusion(batch: RecordBatch) -> RecordBatch:
+    """Downcast nanosecond timestamp columns to microsecond for DataFusion compatibility.
+
+    DataFusion 51.0.0 rejects ``Timestamp(Nanosecond, None)`` Arrow types
+    received via FFI.  This casts any nanosecond timestamp columns to
+    microsecond precision, preserving timezone if present.
+    """
+    new_arrays: list[pa.Array] = []
+    new_fields: list[pa.Field] = []
+    needs_cast = False
+
+    for i, field in enumerate(batch.schema):
+        if pa.types.is_timestamp(field.type) and field.type.unit == "ns":
+            target_type = pa.timestamp("us", tz=field.type.tz)
+            new_arrays.append(batch.column(i).cast(target_type))
+            new_fields.append(field.with_type(target_type))
+            needs_cast = True
+        else:
+            new_arrays.append(batch.column(i))
+            new_fields.append(field)
+
+    if not needs_cast:
+        return batch
+
+    return RecordBatch.from_arrays(new_arrays, schema=pa.schema(new_fields))
+
+
 def _bind_batch_table(session: SessionContext, table_id: TableIdentifier, batch: RecordBatch) -> None:
     """Bind a single batch to the table name used by transform SQL."""
     name = to_sql_identifier(table_id)
     session.deregister_table(name)
+    batch = _coerce_timestamps_for_datafusion(batch)
     session.register_record_batches(name, [[batch]])
 
 

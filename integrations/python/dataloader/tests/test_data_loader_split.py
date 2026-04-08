@@ -23,6 +23,7 @@ from openhouse.dataloader.data_loader_split import (
     DataLoaderSplit,
     TableScanContext,
     _bind_batch_table,
+    _coerce_timestamps_for_datafusion,
     to_sql_identifier,
 )
 from openhouse.dataloader.table_identifier import TableIdentifier
@@ -283,7 +284,7 @@ def test_split_with_transformer_and_empty_batches(tmp_path):
 def test_bind_batch_table_rebinds_each_batch():
     """Batch binding always deregisters before registering to avoid collisions."""
     session = MagicMock(spec=SessionContext)
-    batch = MagicMock(spec=pa.RecordBatch)
+    batch = pa.record_batch({"id": pa.array([1], type=pa.int64())})
 
     _bind_batch_table(session, _TABLE_ID, batch)
 
@@ -323,6 +324,88 @@ def test_split_transform_reuses_session_per_split_and_rebinds_per_batch(tmp_path
     assert registry.calls == 1
     assert result.column("id").to_pylist() == [1, 2]
     assert result.column("name").to_pylist() == ["MASKED", "MASKED"]
+
+
+# --- Timestamp coercion tests ---
+
+
+def test_coerce_timestamps_downcasts_nanosecond():
+    """_coerce_timestamps_for_datafusion downcasts ns to us."""
+    batch = pa.record_batch(
+        {
+            "id": pa.array([1], type=pa.int64()),
+            "ts": pa.array([1_000_000_000], type=pa.timestamp("ns")),
+        }
+    )
+    result = _coerce_timestamps_for_datafusion(batch)
+    assert result.schema.field("ts").type == pa.timestamp("us")
+    assert result.schema.field("id").type == pa.int64()
+    assert result.column("ts").to_pylist() == result.column("ts").to_pylist()
+
+
+def test_coerce_timestamps_preserves_timezone():
+    """_coerce_timestamps_for_datafusion preserves timezone when downcasting."""
+    batch = pa.record_batch(
+        {
+            "ts": pa.array([1_000_000_000], type=pa.timestamp("ns", tz="UTC")),
+        }
+    )
+    result = _coerce_timestamps_for_datafusion(batch)
+    assert result.schema.field("ts").type == pa.timestamp("us", tz="UTC")
+
+
+def test_coerce_timestamps_noop_for_non_timestamp():
+    """_coerce_timestamps_for_datafusion returns the same batch when no ns timestamps."""
+    batch = pa.record_batch(
+        {
+            "id": pa.array([1], type=pa.int64()),
+            "name": pa.array(["alice"], type=pa.string()),
+        }
+    )
+    result = _coerce_timestamps_for_datafusion(batch)
+    assert result is batch
+
+
+def test_coerce_timestamps_noop_for_microsecond():
+    """Microsecond timestamps are not modified."""
+    batch = pa.record_batch(
+        {
+            "ts": pa.array([1_000_000], type=pa.timestamp("us")),
+        }
+    )
+    result = _coerce_timestamps_for_datafusion(batch)
+    assert result is batch
+
+
+def test_transform_handles_nanosecond_timestamps(tmp_path):
+    """Nanosecond timestamp columns are downcast to microsecond for DataFusion transforms."""
+    from pyiceberg.types import TimestampType
+
+    iceberg_schema = Schema(
+        NestedField(field_id=1, name="id", field_type=LongType(), required=False),
+        NestedField(field_id=2, name="ts", field_type=TimestampType(), required=False),
+    )
+    table_id = TableIdentifier("db", "tbl")
+    sql = f"SELECT id, ts FROM {to_sql_identifier(table_id)}"
+    table = pa.table(
+        {
+            "id": pa.array([1, 2], type=pa.int64()),
+            "ts": pa.array([1_000_000_000, 2_000_000_000], type=pa.timestamp("ns")),
+        }
+    )
+
+    split = _create_test_split(
+        tmp_path,
+        table,
+        FileFormat.PARQUET,
+        iceberg_schema,
+        transform_sql=sql,
+        table_id=table_id,
+    )
+    result = pa.Table.from_batches(list(split))
+
+    assert result.num_rows == 2
+    assert result.column("id").to_pylist() == [1, 2]
 
 
 # --- Pickle tests ---
