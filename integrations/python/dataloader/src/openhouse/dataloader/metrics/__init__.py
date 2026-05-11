@@ -1,4 +1,4 @@
-"""OpenTelemetry metrics instrumentation for the dataloader.
+"""OpenTelemetry metrics infrastructure for the dataloader.
 
 This package depends only on ``opentelemetry-api``, which provides a no-op
 fallback when no SDK is configured.  The *application* (not this library)
@@ -13,19 +13,14 @@ Usage::
     # Custom provider (for testing or explicit wiring):
     m = get_metrics(meter_provider=my_provider)
 
-    m.split.record_batch(100, {"table": "db.t"})
-
-To add a new metric group (e.g. loader-level planning metrics), create a
-new ``_loader.py`` module with its own instruments class, instantiate it
-from a shared ``Meter`` in ``DataLoaderMetrics``, and expose it as an
-attribute (e.g. ``m.loader``).
+To add a metric group, create a module (e.g. ``_split.py``) with an
+instruments class built from a shared ``Meter``, instantiate it from
+``DataLoaderMetrics.__init__``, and expose it as an attribute.
 """
 
 from __future__ import annotations
 
-from opentelemetry.metrics import MeterProvider, get_meter
-
-from openhouse.dataloader.metrics._split import SplitMetrics
+from opentelemetry.metrics import Meter, MeterProvider, get_meter
 
 METER_NAME = "openhouse.dataloader"
 
@@ -33,17 +28,15 @@ METER_NAME = "openhouse.dataloader"
 class DataLoaderMetrics:
     """Top-level metrics container.
 
-    Groups instrument classes by concern.  Currently only ``split``
-    (split iteration metrics) is populated; future groups (e.g. ``loader``
-    for scan-planning metrics) can be added without changing call sites.
+    Holds a shared ``Meter`` from which metric-group classes can be built.
+    No instrument groups are populated yet; add them (e.g.
+    ``self.split = SplitMetrics(self._meter)``) as they are introduced.
     """
 
     def __init__(self, meter_provider: MeterProvider | None = None) -> None:
-        self._meter = get_meter(METER_NAME, meter_provider=meter_provider)
-        self.split = SplitMetrics(self._meter)
+        self._meter: Meter = get_meter(METER_NAME, meter_provider=meter_provider)
 
 
-# Default instance using the global MeterProvider (no-op until SDK configured).
 _default = DataLoaderMetrics()
 
 
