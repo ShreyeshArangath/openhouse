@@ -2,24 +2,29 @@
 requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
 
-[tool.hatch.metadata]
-allow-direct-references = true
-
 [project]
 name = "openhouse.dataloader"
 dynamic = ["version"]
 description = "A Python library for distributed data loading of OpenHouse tables"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.10"
 license = {text = "BSD-2-Clause"}
 keywords = ["openhouse", "data-loader", "lakehouse", "iceberg", "datafusion"]
 dependencies = [
-    "datafusion==51.0.0",
-    "pyiceberg @ git+https://github.com/sumedhsakdeo/iceberg-python@75ba28bfc6d8bbeac398357c6db80327632a2dc8",
+    "datafusion==53.0.0",
+    "li-pyiceberg==0.11.5",
     "requests>=2.31.0",
+    "sqlglot>=29.0.0",
     "tenacity>=8.0.0",
     "opentelemetry-api>=1.20.0",
 ]
+
+[[tool.uv.index]]
+url = "https://linkedin.jfrog.io/artifactory/api/pypi/openhouse-pypi/simple/"
+name = "openhouse-pypi"
+
+[tool.uv.sources]
+li-pyiceberg = { index = "openhouse-pypi" }
 
 [project.optional-dependencies]
 dev = [
@@ -40,18 +45,18 @@ raw-options = { root = "../../.." }
 packages = ["src/openhouse"]
 
 [tool.mypy]
-python_version = "3.12"
+python_version = "3.10"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true
 
 [[tool.mypy.overrides]]
-module = ["datafusion.*", "pyiceberg.*", "pyarrow.*", "tenacity.*"]
+module = ["datafusion.*", "pyiceberg.*", "pyarrow.*", "sqlglot.*", "tenacity.*"]
 ignore_missing_imports = true
 
 [tool.ruff]
 line-length = 120
-target-version = "py312"
+target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]

@@ -1,8 +1,12 @@
+from __future__ import annotations
+
 import logging
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from functools import cached_property
+from itertools import islice
 from types import MappingProxyType
+from typing import TypeVar
 
 from pyiceberg.catalog import Catalog
 from pyiceberg.table import Table
@@ -10,10 +14,20 @@ from pyiceberg.table.snapshots import Snapshot
 from requests import HTTPError
 from tenacity import Retrying, retry_if_exception, stop_after_attempt, wait_exponential
 
+from openhouse.dataloader._jvm import apply_libhdfs_opts
 from openhouse.dataloader._table_scan_context import TableScanContext
 from openhouse.dataloader._timer import log_duration
 from openhouse.dataloader.data_loader_split import DataLoaderSplit
-from openhouse.dataloader.filters import Filter, _to_pyiceberg, always_true
+from openhouse.dataloader.datafusion_sql import DataFusion, to_datafusion_sql
+from openhouse.dataloader.filters import (
+    AlwaysTrue,
+    Filter,
+    _quote_identifier,
+    _to_datafusion_sql,
+    _to_pyiceberg,
+    always_true,
+)
+from openhouse.dataloader.scan_optimizer import optimize_scan
 from openhouse.dataloader.table_identifier import TableIdentifier
 from openhouse.dataloader.table_transformer import TableTransformer
 from openhouse.dataloader.udf_registry import UDFRegistry
@@ -28,7 +42,16 @@ def _is_transient(exc: BaseException) -> bool:
     return isinstance(exc, OSError)
 
 
-def _retry[T](fn: Callable[[], T], label: str, max_attempts: int) -> T:
+_T = TypeVar("_T")  # lets the type checker infer that return types match input types
+
+
+def _batched(iterable: Iterable[_T], n: int) -> Iterator[tuple[_T, ...]]:
+    it = iter(iterable)
+    while batch := tuple(islice(it, n)):
+        yield batch
+
+
+def _retry(fn: Callable[[], _T], label: str, max_attempts: int) -> _T:
     """Call *fn* with retry logic, logging duration of each attempt.
 
     Retries on ``OSError`` (transient network/storage I/O failures),
@@ -46,6 +69,29 @@ def _retry[T](fn: Callable[[], T], label: str, max_attempts: int) -> T:
     raise AssertionError("unreachable")  # pragma: no cover
 
 
+@dataclass(frozen=True)
+class JvmConfig:
+    """JVM arguments for JNI-based storage access (e.g. HDFS via libhdfs).
+
+    The JVM is created once per process.  If another library has already
+    started a JVM these arguments will have no effect.
+
+    Args:
+        planner_args: JVM arguments (e.g. ``-Xmx2g``) applied when the JNI
+            JVM is created in the planner process — the process that loads
+            table metadata and plans splits.
+        worker_args: JVM arguments applied when the JNI JVM is created in
+            worker processes that materialize splits.  Only honored if the
+            JVM has not already been started in the worker process.  When
+            splits are materialized in the same process as the planner,
+            only ``planner_args`` takes effect because the JVM is already
+            running.
+    """
+
+    planner_args: str | None = None
+    worker_args: str | None = None
+
+
 @dataclass
 class DataLoaderContext:
     """Context and customization for the DataLoader.
@@ -57,11 +103,14 @@ class DataLoaderContext:
         execution_context: Dictionary of execution context information (e.g. tenant, environment)
         table_transformer: Transformation to apply to the table before loading (e.g. column masking)
         udf_registry: UDFs required for the table transformation
+        jvm_config: JVM configuration for JNI-based storage access.  Currently only HDFS is supported
+            via the ``LIBHDFS_OPTS`` environment variable.  See :class:`JvmConfig`.
     """
 
     execution_context: Mapping[str, str] | None = None
     table_transformer: TableTransformer | None = None
     udf_registry: UDFRegistry | None = None
+    jvm_config: JvmConfig | None = None
 
 
 class OpenHouseDataLoader:
@@ -79,6 +128,7 @@ class OpenHouseDataLoader:
         context: DataLoaderContext | None = None,
         max_attempts: int = 3,
         batch_size: int | None = None,
+        files_per_split: int = 1,
     ):
         """
         Args:
@@ -95,7 +145,15 @@ class OpenHouseDataLoader:
                 Passed to PyArrow's Scanner which produces batches of at most this many
                 rows. Smaller values reduce peak memory but increase per-batch overhead.
                 None uses the PyArrow default (~131K rows).
+            files_per_split: Number of files each split reads concurrently.
+                Default is 1 (one file per split).
         """
+        if branch is not None and branch.strip() == "":
+            raise ValueError("branch must not be empty or whitespace")
+        if branch is not None and snapshot_id is not None:
+            raise ValueError("Cannot specify both branch and snapshot_id")
+        if files_per_split < 1:
+            raise ValueError("files_per_split must be at least 1")
         self._catalog = catalog
         self._table_id = TableIdentifier(database, table, branch)
         self._snapshot_id = snapshot_id
@@ -104,6 +162,10 @@ class OpenHouseDataLoader:
         self._context = context or DataLoaderContext()
         self._max_attempts = max_attempts
         self._batch_size = batch_size
+        self._files_per_split = files_per_split
+
+        if self._context.jvm_config is not None and self._context.jvm_config.planner_args is not None:
+            apply_libhdfs_opts(self._context.jvm_config.planner_args)
 
     @cached_property
     def _iceberg_table(self) -> Table:
@@ -121,7 +183,17 @@ class OpenHouseDataLoader:
     @cached_property
     def snapshot_id(self) -> int | None:
         """Snapshot ID of the loaded table, or None if the table has no snapshots"""
-        return self._snapshot_id if self._snapshot_id is not None else self._iceberg_table.metadata.current_snapshot_id
+        if self._snapshot_id is not None:
+            return self._snapshot_id
+        if self._table_id.branch:
+            snapshot = self._iceberg_table.snapshot_by_name(self._table_id.branch)
+            if snapshot is None:
+                raise ValueError(
+                    f"Branch '{self._table_id.branch}' not found for table "
+                    f"{self._table_id.database}.{self._table_id.table}"
+                )
+            return snapshot.snapshot_id
+        return self._iceberg_table.metadata.current_snapshot_id
 
     def _verify_snapshot(self, snapshot: Snapshot | None) -> None:
         """Log the resolved snapshot or raise if a user-provided snapshot_id was not found."""
@@ -132,6 +204,28 @@ class OpenHouseDataLoader:
         else:
             logger.info("No snapshot found for table %s", self._table_id)
 
+    def _build_query(self) -> str | None:
+        """Build the combined SQL query from the transformer, user columns, and filters.
+
+        Calls the table transformer to get the transform SQL, transpiles it to
+        DataFusion dialect, and wraps it as a subquery with user column projection
+        and filter predicates. Returns ``None`` if there is no transformer or the
+        transformer returns ``None``.
+        """
+        transformer = self._context.table_transformer
+        if transformer is None:
+            return None
+        execution_context = self._context.execution_context or {}
+        sql = transformer.transform(self._table_id, execution_context)
+        if sql is None:
+            return None
+        sql = to_datafusion_sql(sql, transformer.dialect, table=self._table_id)
+        outer_cols = ", ".join(_quote_identifier(c) for c in self._columns) if self._columns else "*"
+        combined = f"SELECT {outer_cols} FROM ({sql}) AS _t"
+        if self._filters and not isinstance(self._filters, AlwaysTrue):
+            combined += f" WHERE {_to_datafusion_sql(self._filters)}"
+        return combined
+
     def __iter__(self) -> Iterator[DataLoaderSplit]:
         """Iterate over data splits for distributed data loading of the table.
 
@@ -140,13 +234,36 @@ class OpenHouseDataLoader:
         """
         table = self._iceberg_table
 
-        row_filter = _to_pyiceberg(self._filters)
-
-        scan_kwargs: dict = {"row_filter": row_filter}
+        scan_kwargs: dict = {}
         if self.snapshot_id is not None:
             scan_kwargs["snapshot_id"] = self.snapshot_id
-        if self._columns:
-            scan_kwargs["selected_fields"] = tuple(self._columns)
+
+        query = self._build_query()
+        if query is not None:
+            plan = optimize_scan(
+                query,
+                dialect=DataFusion.DIALECT,
+                database=self._table_id.database,
+                table=self._table_id.table,
+                column_names=[f.name for f in table.schema().fields],
+            )
+            optimized_sql = plan.sql
+            row_filter = _to_pyiceberg(plan.row_filter)
+            scan_kwargs["selected_fields"] = tuple(plan.source_columns)
+            logger.info(
+                "Split SQL optimized from '%s' to '%s' with pushdown predicates %s and projections %s",
+                query,
+                optimized_sql,
+                row_filter,
+                plan.source_columns,
+            )
+        else:
+            optimized_sql = None
+            row_filter = _to_pyiceberg(self._filters)
+            if self._columns:
+                scan_kwargs["selected_fields"] = tuple(self._columns)
+
+        scan_kwargs["row_filter"] = row_filter
 
         scan = table.scan(**scan_kwargs)
 
@@ -157,7 +274,8 @@ class OpenHouseDataLoader:
             io=table.io,
             projected_schema=scan.projection(),
             row_filter=row_filter,
-            table_name=str(self._table_id),
+            table_id=self._table_id,
+            worker_jvm_args=self._context.jvm_config.worker_args if self._context.jvm_config else None,
         )
 
         # plan_files() materializes all tasks at once (PyIceberg doesn't support streaming)
@@ -166,9 +284,11 @@ class OpenHouseDataLoader:
             lambda: scan.plan_files(), label=f"plan_files {self._table_id}", max_attempts=self._max_attempts
         )
 
-        for scan_task in scan_tasks:
+        for chunk in _batched(scan_tasks, self._files_per_split):
             yield DataLoaderSplit(
-                file_scan_task=scan_task,
+                file_scan_tasks=chunk,
                 scan_context=scan_context,
+                transform_sql=optimized_sql,
+                udf_registry=self._context.udf_registry,
                 batch_size=self._batch_size,
             )

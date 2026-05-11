@@ -11,9 +11,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
-import org.apache.iceberg.CatalogUtil;
 import org.apache.iceberg.DataFile;
 import org.apache.iceberg.DataFiles;
+import org.apache.iceberg.NullOrder;
 import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.SchemaParser;
@@ -31,7 +31,6 @@ import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
-import scala.collection.JavaConverters;
 
 public class CatalogOperationTest extends OpenHouseSparkITest {
 
@@ -242,29 +241,6 @@ public class CatalogOperationTest extends OpenHouseSparkITest {
     }
   }
 
-  /**
-   * This is a copy of com.linkedin.openhouse.jobs.spark.Operations#getCatalog() temporarily.
-   * Refactoring these pieces require deployment coordination, thus we shall create an artifact
-   * module that can be pulled by :apps module.
-   */
-  private Catalog getOpenHouseCatalog(SparkSession spark) {
-    final Map<String, String> catalogProperties = new HashMap<>();
-    final String catalogPropertyPrefix = String.format("spark.sql.catalog.openhouse.");
-    final Map<String, String> sparkProperties = JavaConverters.mapAsJavaMap(spark.conf().getAll());
-    for (Map.Entry<String, String> entry : sparkProperties.entrySet()) {
-      if (entry.getKey().startsWith(catalogPropertyPrefix)) {
-        catalogProperties.put(
-            entry.getKey().substring(catalogPropertyPrefix.length()), entry.getValue());
-      }
-    }
-    // this initializes the catalog based on runtime Catalog class passed in catalog-impl conf.
-    return CatalogUtil.loadCatalog(
-        sparkProperties.get("spark.sql.catalog.openhouse.catalog-impl"),
-        "openhouse",
-        catalogProperties,
-        spark.sparkContext().hadoopConfiguration());
-  }
-
   private Policies getPoliciesObj(String tableName, SparkSession spark) {
     List<Row> props = spark.sql(String.format("show tblProperties %s", tableName)).collectAsList();
     Map<String, String> collect =
@@ -426,6 +402,62 @@ public class CatalogOperationTest extends OpenHouseSparkITest {
           "CREATE TABLE openhouse.db.test_sort_order_ctas_sql AS SELECT * FROM openhouse.db.t1");
       Table newSqlTable = catalog.loadTable(TableIdentifier.of("db", "test_sort_order_ctas_sql"));
       Assertions.assertEquals(SortOrder.unsorted(), newSqlTable.sortOrder());
+    }
+  }
+
+  @Test
+  public void testWriteOrderedByPersistsMultiColumnSortOrder() throws Exception {
+    try (SparkSession spark = getSparkSession()) {
+      Catalog catalog = getOpenHouseCatalog(spark);
+      spark.sql(
+          "CREATE TABLE openhouse.db.write_ordered_multi (id INT, category STRING, data STRING)");
+      spark.sql("ALTER TABLE openhouse.db.write_ordered_multi WRITE ORDERED BY category, id");
+
+      Table table = catalog.loadTable(TableIdentifier.of("db", "write_ordered_multi"));
+      Assertions.assertEquals(
+          SortOrder.builderFor(table.schema()).asc("category").asc("id").build(),
+          table.sortOrder());
+    }
+  }
+
+  @Test
+  public void testWriteOrderedByRespectsDirectionAndNullOrder() throws Exception {
+    try (SparkSession spark = getSparkSession()) {
+      Catalog catalog = getOpenHouseCatalog(spark);
+      spark.sql("CREATE TABLE openhouse.db.write_ordered_desc (id INT, category STRING)");
+      // DESC defaults to NULLS LAST in Iceberg; override to NULLS FIRST to verify both
+      // direction and null-order are propagated end-to-end.
+      spark.sql(
+          "ALTER TABLE openhouse.db.write_ordered_desc WRITE ORDERED BY category DESC NULLS FIRST");
+
+      Table table = catalog.loadTable(TableIdentifier.of("db", "write_ordered_desc"));
+      Assertions.assertEquals(
+          SortOrder.builderFor(table.schema()).desc("category", NullOrder.NULLS_FIRST).build(),
+          table.sortOrder());
+    }
+  }
+
+  @Test
+  public void testWriteOrderedByRoundTripsThroughInsert() throws Exception {
+    try (SparkSession spark = getSparkSession()) {
+      Catalog catalog = getOpenHouseCatalog(spark);
+      spark.sql("CREATE TABLE openhouse.db.write_ordered_insert (id INT, category STRING)");
+      spark.sql("ALTER TABLE openhouse.db.write_ordered_insert WRITE ORDERED BY id");
+
+      spark.sql(
+          "INSERT INTO openhouse.db.write_ordered_insert VALUES (3, 'C'), (1, 'A'), (2, 'B')");
+
+      Table table = catalog.loadTable(TableIdentifier.of("db", "write_ordered_insert"));
+      // Sort order metadata is preserved across an INSERT (no implicit reset).
+      Assertions.assertEquals(
+          SortOrder.builderFor(table.schema()).asc("id").build(), table.sortOrder());
+
+      List<Row> rows =
+          spark.sql("SELECT id FROM openhouse.db.write_ordered_insert ORDER BY id").collectAsList();
+      Assertions.assertEquals(3, rows.size());
+      Assertions.assertEquals(1, rows.get(0).getInt(0));
+      Assertions.assertEquals(2, rows.get(1).getInt(0));
+      Assertions.assertEquals(3, rows.get(2).getInt(0));
     }
   }
 }

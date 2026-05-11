@@ -12,7 +12,7 @@ plugins {
 dependencies {
   implementation 'com.github.spotbugs:spotbugs-annotations:4.8.1'
   api 'org.springframework.retry:spring-retry:1.3.3'
-  compileOnly "io.opentelemetry.instrumentation:opentelemetry-instrumentation-annotations:${otel_annotations_version}"
+  implementation "io.opentelemetry.instrumentation:opentelemetry-instrumentation-annotations:${otel_annotations_version}"
   api 'io.opentelemetry:opentelemetry-api:1.47.0'
   api project(':client:hts')
   api project(':cluster:storage')
@@ -25,6 +25,8 @@ dependencies {
   testImplementation "com.squareup.okhttp3:okhttp:" + ok_http3_version
   testImplementation "com.squareup.okhttp3:mockwebserver:" + ok_http3_version
   testImplementation "org.mockito:mockito-inline:4.11.0"
+  testImplementation "io.opentelemetry:opentelemetry-sdk:1.47.0"
+  testImplementation "io.opentelemetry:opentelemetry-sdk-testing:1.47.0"
 }
 
 spotbugsTestFixtures.enabled = false

@@ -19,10 +19,13 @@ from pyiceberg.types import LongType, NestedField, StringType
 
 from openhouse.dataloader.data_loader_split import DataLoaderSplit, TableScanContext
 from openhouse.dataloader.metrics import DataLoaderMetrics, get_metrics
+from openhouse.dataloader.table_identifier import TableIdentifier
 
 
-def _make_split(tmp_path, table_name="test_db.test_table"):
+def _make_split(tmp_path, table_id=None):
     """Create a DataLoaderSplit backed by a small Parquet file."""
+    if table_id is None:
+        table_id = TableIdentifier("test_db", "test_table")
     iceberg_schema = Schema(
         NestedField(field_id=1, name="id", field_type=LongType(), required=False),
         NestedField(field_id=2, name="name", field_type=StringType(), required=False),
@@ -51,7 +54,7 @@ def _make_split(tmp_path, table_name="test_db.test_table"):
         table_metadata=metadata,
         io=load_file_io(properties={}, location=file_path),
         projected_schema=iceberg_schema,
-        table_name=table_name,
+        table_id=table_id,
     )
 
     data_file = DataFile.from_args(
@@ -63,7 +66,7 @@ def _make_split(tmp_path, table_name="test_db.test_table"):
     data_file._spec_id = 0
     task = FileScanTask(data_file=data_file)
 
-    return DataLoaderSplit(file_scan_task=task, scan_context=scan_context)
+    return DataLoaderSplit(file_scan_tasks=[task], scan_context=scan_context)
 
 
 @pytest.fixture()
@@ -146,8 +149,9 @@ def test_no_sdk_is_noop(tmp_path):
 
 def test_attributes_include_table_name(tmp_path, metric_reader):
     """All metrics should carry the 'table' attribute with the fully-qualified table name."""
-    table_name = "my_db.my_table"
-    split = _make_split(tmp_path, table_name=table_name)
+    table_id = TableIdentifier("my_db", "my_table")
+    expected = str(table_id)
+    split = _make_split(tmp_path, table_id=table_id)
     list(split)
 
     for metric_name in ["split_iter_count", "batch_count", "row_count", "bytes_read"]:
@@ -155,7 +159,7 @@ def test_attributes_include_table_name(tmp_path, metric_reader):
         assert metric is not None, f"Missing metric: {metric_name}"
         for dp in metric.data.data_points:
             attrs = dict(dp.attributes)
-            assert attrs.get("table") == table_name, f"Wrong table attr on {metric_name}: {attrs}"
+            assert attrs.get("table") == expected, f"Wrong table attr on {metric_name}: {attrs}"
 
 
 def test_get_metrics_returns_default_without_provider():

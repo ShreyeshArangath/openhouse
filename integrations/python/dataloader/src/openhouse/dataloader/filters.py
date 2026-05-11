@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import math
 import typing
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from datetime import date, datetime, time
+from decimal import Decimal
 from typing import Any
+from uuid import UUID
 
 from pyiceberg import expressions as ice
+from sqlglot import exp
 
 
 class Filter(ABC):
@@ -305,6 +310,114 @@ class Not(Filter):
 
     def __repr__(self) -> str:
         return f"~{self.operand!r}"
+
+
+# --- Conversion functions ---
+
+
+def _quote_identifier(name: str) -> str:
+    """Escape a SQL identifier using sqlglot."""
+    return exp.to_identifier(name, quoted=True).sql()
+
+
+def _escape_like(value: str) -> str:
+    """Escape LIKE-special characters so they are matched literally."""
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _literal_to_sql(value: object) -> str:
+    """Convert a Python literal to a SQL literal string using sqlglot."""
+    if isinstance(value, str):
+        return exp.Literal.string(value).sql()
+    if isinstance(value, bool):
+        return exp.Boolean(this=True).sql() if value else exp.Boolean(this=False).sql()
+    if isinstance(value, datetime):
+        lit = exp.Literal.string(value.strftime("%Y-%m-%d %H:%M:%S.%f%z"))
+        return exp.Cast(this=lit, to=exp.DataType.build("TIMESTAMP")).sql()
+    if isinstance(value, date):
+        lit = exp.Literal.string(value.isoformat())
+        return exp.Cast(this=lit, to=exp.DataType.build("DATE")).sql()
+    if isinstance(value, time):
+        if value.tzinfo is not None:
+            raise TypeError(
+                "DataFusion does not support timezones for time data types. "
+                "The time should match the timezone used in the dataset."
+            )
+        lit = exp.Literal.string(value.strftime("%H:%M:%S.%f"))
+        return exp.Cast(this=lit, to=exp.DataType.build("TIME")).sql()
+    if isinstance(value, (int, float)):
+        if isinstance(value, float) and not math.isfinite(value):
+            return exp.Cast(this=exp.Literal.string(str(value)), to=exp.DataType.build("DOUBLE")).sql()
+        return exp.Literal.number(value).sql()
+    if isinstance(value, Decimal):
+        if not value.is_finite():
+            return exp.Cast(this=exp.Literal.string(str(value)), to=exp.DataType.build("DOUBLE")).sql()
+        return exp.Literal.number(value).sql()
+    if isinstance(value, UUID):
+        return exp.Literal.string(str(value)).sql()
+    raise TypeError(f"Unsupported literal type: {type(value).__name__}")
+
+
+def _to_datafusion_sql(expr: Filter) -> str:
+    """Convert a Filter expression tree to a DataFusion SQL expression string."""
+    match expr:
+        case AlwaysTrue():
+            return exp.Boolean(this=True).sql()
+
+        # Comparison
+        case EqualTo(column, value):
+            return f"{_quote_identifier(column)} = {_literal_to_sql(value)}"
+        case NotEqualTo(column, value):
+            return f"{_quote_identifier(column)} <> {_literal_to_sql(value)}"
+        case GreaterThan(column, value):
+            return f"{_quote_identifier(column)} > {_literal_to_sql(value)}"
+        case GreaterThanOrEqual(column, value):
+            return f"{_quote_identifier(column)} >= {_literal_to_sql(value)}"
+        case LessThan(column, value):
+            return f"{_quote_identifier(column)} < {_literal_to_sql(value)}"
+        case LessThanOrEqual(column, value):
+            return f"{_quote_identifier(column)} <= {_literal_to_sql(value)}"
+
+        # Null / NaN
+        case IsNull(column):
+            return f"{_quote_identifier(column)} IS NULL"
+        case IsNotNull(column):
+            return f"{_quote_identifier(column)} IS NOT NULL"
+        case IsNaN(column):
+            return f"{_quote_identifier(column)} IS NAN"
+        case IsNotNaN(column):
+            return f"{_quote_identifier(column)} IS NOT NAN"
+
+        # Set membership
+        case In(column, values):
+            vals = ", ".join(_literal_to_sql(v) for v in values)
+            return f"{_quote_identifier(column)} IN ({vals})"
+        case NotIn(column, values):
+            vals = ", ".join(_literal_to_sql(v) for v in values)
+            return f"{_quote_identifier(column)} NOT IN ({vals})"
+
+        # String prefix
+        case StartsWith(column, prefix):
+            escaped = _escape_like(prefix)
+            return f"{_quote_identifier(column)} LIKE {_literal_to_sql(escaped + '%')} ESCAPE '\\'"
+        case NotStartsWith(column, prefix):
+            escaped = _escape_like(prefix)
+            return f"{_quote_identifier(column)} NOT LIKE {_literal_to_sql(escaped + '%')} ESCAPE '\\'"
+
+        # Range
+        case Between(column, lower, upper):
+            return f"{_quote_identifier(column)} BETWEEN {_literal_to_sql(lower)} AND {_literal_to_sql(upper)}"
+
+        # Logical combinators
+        case And(left, right):
+            return f"({_to_datafusion_sql(left)} AND {_to_datafusion_sql(right)})"
+        case Or(left, right):
+            return f"({_to_datafusion_sql(left)} OR {_to_datafusion_sql(right)})"
+        case Not(operand):
+            return f"NOT ({_to_datafusion_sql(operand)})"
+
+        case _:
+            raise TypeError(f"Unsupported filter type: {type(expr).__name__}")
 
 
 def _to_pyiceberg(expr: Filter) -> ice.BooleanExpression:
