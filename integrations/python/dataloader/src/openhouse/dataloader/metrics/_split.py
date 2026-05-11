@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
 
@@ -66,7 +67,7 @@ class SplitMetrics:
         self.error_count.add(1, attributes)
 
     @contextmanager
-    def timed_split_iteration(self, attributes: dict[str, Any]):
+    def timed_split_iteration(self, attributes: dict[str, Any]) -> Iterator[None]:
         """Context manager that records split start, duration, and errors."""
         self.record_split_started(attributes)
         start = time.monotonic()

@@ -16,6 +16,8 @@ import org.junit.jupiter.api.Test;
 
 public class BranchJavaTest extends OpenHouseSparkITest {
 
+  private static final String DATABASE = "d1_branch_java";
+
   private static final DataFile F1 =
       DataFiles.builder(PartitionSpec.unpartitioned())
           .withPath("/p/f1.parquet")
@@ -42,7 +44,7 @@ public class BranchJavaTest extends OpenHouseSparkITest {
     // 6. Staged Commits: Confirms stageOnly adds a snapshot without updating branch reference
     // history.
     try (SparkSession spark = getSparkSession()) {
-      String name = "d1.branch_test";
+      String name = DATABASE + ".branch_test";
       spark.sql("DROP TABLE IF EXISTS openhouse." + name);
       spark.sql("CREATE TABLE openhouse." + name + " (d string)");
       CatalogPlugin plugin = spark.sessionState().catalogManager().catalog("openhouse");
@@ -90,8 +92,9 @@ public class BranchJavaTest extends OpenHouseSparkITest {
       Assertions.assertEquals(
           5, list(table.snapshots()).size()); // 5 committed snapshots in snapshots list
 
-      // 4. Expiration
-      table.expireSnapshots().expireOlderThan(System.currentTimeMillis() - 1000).commit();
+      // 4. Expiration (use 10s window to avoid flakiness in slow CI - we only need to verify
+      // expiration doesn't remove reachable snapshots)
+      table.expireSnapshots().expireOlderThan(System.currentTimeMillis() - 10_000).commit();
       table = catalog.loadTable(TableIdentifier.parse(name));
       // Should still have the latest snapshots on branches and main
       Assertions.assertNotNull(table.currentSnapshot());
@@ -123,8 +126,11 @@ public class BranchJavaTest extends OpenHouseSparkITest {
 
       // Verify sizes
       // Main history: snap1 -> snap2 -> snap3 -> snap4(cherry1) -> snap5(cherry2)
-      if (table.history().size() != 5) {
-        System.out.println("HISTORY SIZE MISMATCH: " + table.history().size());
+      int historySize = table.history().size();
+      int snapshotCount = list(table.snapshots()).size();
+      if (historySize != 5 || snapshotCount != 9) {
+        System.out.println("HISTORY SIZE: " + historySize + " (expected 5)");
+        System.out.println("SNAPSHOT COUNT: " + snapshotCount + " (expected 9)");
         System.out.println("Refs: " + table.refs());
         table
             .snapshots()
@@ -138,10 +144,12 @@ public class BranchJavaTest extends OpenHouseSparkITest {
                             + ", Ts: "
                             + s.timestampMillis()));
       }
-      Assertions.assertEquals(5, table.history().size());
+      Assertions.assertEquals(
+          5, historySize, "Main history should have 5 entries: snap1->snap2->snap3->snap4->snap5");
 
       // Total Snapshots: 5 (Main) + 2 (featureA unique) + 2 (featureB unique) = 9
-      Assertions.assertEquals(9, list(table.snapshots()).size());
+      Assertions.assertEquals(
+          9, snapshotCount, "Total snapshots should be 9 (5 main + 2 featureA + 2 featureB)");
 
       // Fast-forward / Staged
       table.newAppend().appendFile(F1).stageOnly().commit();

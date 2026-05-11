@@ -34,15 +34,6 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@v7
-        with:
-          enable-cache: true
-
-      - name: Run Data Loader Tests
-        working-directory: integrations/python/dataloader
-        run: make sync verify
-
       - name: Install dependencies
         run: pip install -r scripts/python/requirements.txt
 

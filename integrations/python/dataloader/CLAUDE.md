@@ -15,10 +15,40 @@ make format    # Auto-format code
 make build          # Build package distributions
 make package-check  # Validate built distributions with twine
 make clean          # Clean build artifacts
+make integration-tests TOKEN_FILE=<path>  # Run integration tests against Docker OpenHouse
 ```
 
 ## Workflows
-When making a change run `make verify` to ensure all tests and checks pass
+
+When validating a change, always run both:
+
+1. `make verify` — lint, format checks, and unit tests
+2. Integration tests against Docker OpenHouse — start the Docker services, then run `make integration-tests`. These test the dataloader end-to-end against a real OpenHouse instance and must pass before a change is considered correct.
+
+Run `make format` before pushing to avoid CI formatting failures.
+
+```bash
+# From the repo root, start Docker services (once per session):
+docker compose -f infra/recipes/docker-compose/oh-hadoop-spark/docker-compose.yml up -d
+
+# From the dataloader directory:
+make format
+make verify
+make integration-tests TOKEN_FILE=../../../tables-test-fixtures/tables-test-fixtures-iceberg-1.2/src/main/resources/dummy.token
+```
+
+## Integration Tests
+
+Integration tests run inside a Docker container on the same network as the oh-hadoop-spark services. The `make integration-tests` target builds a test image and runs it automatically. Tables are created and populated via Spark SQL submitted through Livy.
+
+1. Start the Docker services from the repo root:
+   ```bash
+   docker compose -f infra/recipes/docker-compose/oh-hadoop-spark/docker-compose.yml up -d
+   ```
+2. Wait for all services to be healthy (especially Livy and namenode), then run:
+   ```bash
+   make integration-tests TOKEN_FILE=../../../tables-test-fixtures/tables-test-fixtures-iceberg-1.2/src/main/resources/dummy.token
+   ```
 
 ## Project Structure
 

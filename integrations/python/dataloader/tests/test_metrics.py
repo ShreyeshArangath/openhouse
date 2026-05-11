@@ -6,7 +6,6 @@ from unittest.mock import patch
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
-from datafusion.context import SessionContext
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from pyiceberg.io import load_file_io
@@ -55,9 +54,6 @@ def _make_split(tmp_path, table_name="test_db.test_table"):
         table_name=table_name,
     )
 
-    ctx = SessionContext()
-    plan = ctx.sql("SELECT 1 as a").logical_plan()
-
     data_file = DataFile.from_args(
         file_path=file_path,
         file_format=FileFormat.PARQUET,
@@ -67,7 +63,7 @@ def _make_split(tmp_path, table_name="test_db.test_table"):
     data_file._spec_id = 0
     task = FileScanTask(data_file=data_file)
 
-    return DataLoaderSplit(plan=plan, file_scan_task=task, scan_context=scan_context)
+    return DataLoaderSplit(file_scan_task=task, scan_context=scan_context)
 
 
 @pytest.fixture()

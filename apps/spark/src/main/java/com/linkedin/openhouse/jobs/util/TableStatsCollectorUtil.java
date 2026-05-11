@@ -222,10 +222,18 @@ public final class TableStatsCollectorUtil {
     // location using filesystem call. This just replicates hdfs dfs -count and hdfs dfs -du -s.
     long sumOfTotalDirectorySizeInBytes = 0;
     long numOfObjectsInDirectory = 0;
+    Path tableRootPath = new Path(table.location());
+    String tableRootPrefix = tableRootPath.toString() + "/";
     try {
-      RemoteIterator<LocatedFileStatus> it = fs.listFiles(new Path(table.location()), true);
+      RemoteIterator<LocatedFileStatus> it = fs.listFiles(tableRootPath, true);
       while (it.hasNext()) {
         LocatedFileStatus status = it.next();
+        // Skip files under hidden directories (starting with '.') at the table root level,
+        // e.g. .backup, .trash
+        String relativePath = status.getPath().toString().substring(tableRootPrefix.length());
+        if (relativePath.startsWith(".")) {
+          continue;
+        }
         numOfObjectsInDirectory++;
         sumOfTotalDirectorySizeInBytes += status.getLen();
       }
@@ -1366,12 +1374,13 @@ public final class TableStatsCollectorUtil {
 
         // Extract commit metadata
         Long snapshotId = row.getAs("snapshot_id");
-        Long committedAt = row.getAs("committed_at");
+        Long committedAtSeconds = row.getAs("committed_at");
+        Long committedAtMs = committedAtSeconds != null ? committedAtSeconds * 1000L : null;
         String operation = row.getAs("operation");
         scala.collection.Map<String, String> scalaMap = row.getMap(row.fieldIndex("summary"));
         Map<String, String> summary = scala.collection.JavaConverters.mapAsJavaMap(scalaMap);
         CommitMetadata commitMetadata =
-            buildCommitMetadata(snapshotId, committedAt, operation, summary);
+            buildCommitMetadata(snapshotId, committedAtMs, operation, summary);
 
         // Extract table-level stats
         Long rowCount = row.getAs("total_row_count");
