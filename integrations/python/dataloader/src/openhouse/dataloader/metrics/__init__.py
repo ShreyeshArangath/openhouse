@@ -12,10 +12,6 @@ Usage::
 
     # Custom provider (for testing or explicit wiring):
     m = get_metrics(meter_provider=my_provider)
-
-To add a metric group, create a module (e.g. ``_split.py``) with an
-instruments class built from a shared ``Meter``, instantiate it from
-``DataLoaderMetrics.__init__``, and expose it as an attribute.
 """
 
 from __future__ import annotations
@@ -29,8 +25,6 @@ class DataLoaderMetrics:
     """Top-level metrics container.
 
     Holds a shared ``Meter`` from which metric-group classes can be built.
-    No instrument groups are populated yet; add them (e.g.
-    ``self.split = SplitMetrics(self._meter)``) as they are introduced.
     """
 
     def __init__(self, meter_provider: MeterProvider | None = None) -> None:
