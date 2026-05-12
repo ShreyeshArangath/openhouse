@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import uuid
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from functools import cached_property
@@ -163,6 +164,7 @@ class OpenHouseDataLoader:
         self._max_attempts = max_attempts
         self._batch_size = batch_size
         self._files_per_split = files_per_split
+        self._id = str(uuid.uuid4())
 
         if self._context.jvm_config is not None and self._context.jvm_config.planner_args is not None:
             apply_libhdfs_opts(self._context.jvm_config.planner_args)
@@ -174,6 +176,11 @@ class OpenHouseDataLoader:
             label=f"load_table {self._table_id}",
             max_attempts=self._max_attempts,
         )
+
+    @property
+    def id(self) -> str:
+        """Unique identifier for this data loader instance, generated at construction."""
+        return self._id
 
     @property
     def table_properties(self) -> Mapping[str, str]:
