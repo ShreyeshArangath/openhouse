@@ -9,7 +9,7 @@ from itertools import islice
 from types import MappingProxyType
 from typing import TypeVar
 
-from opentelemetry.metrics import Counter, Histogram
+from opentelemetry.metrics import Counter, Histogram, get_meter
 from pyiceberg.catalog import Catalog
 from pyiceberg.table import Table
 from pyiceberg.table.snapshots import Snapshot
@@ -29,13 +29,36 @@ from openhouse.dataloader.filters import (
     _to_pyiceberg,
     always_true,
 )
-from openhouse.dataloader.metrics import build_attributes, instruments
+from openhouse.dataloader.metrics import METER_NAME, build_attributes
 from openhouse.dataloader.scan_optimizer import optimize_scan
 from openhouse.dataloader.table_identifier import TableIdentifier
 from openhouse.dataloader.table_transformer import TableTransformer
 from openhouse.dataloader.udf_registry import UDFRegistry
 
 logger = logging.getLogger(__name__)
+
+_meter = get_meter(METER_NAME)
+
+_load_table_duration = _meter.create_histogram(
+    name="OpenHouse.DataLoader.LoadTableTime",
+    unit="s",
+    description="Duration of the load_table call.",
+)
+_load_table_attempts = _meter.create_counter(
+    name="OpenHouse.DataLoader.LoadTableAttempts",
+    unit="1",
+    description="Attempt count for the load_table call.",
+)
+_plan_files_duration = _meter.create_histogram(
+    name="OpenHouse.DataLoader.PlanFilesTime",
+    unit="s",
+    description="Duration of the plan_files call.",
+)
+_plan_files_attempts = _meter.create_counter(
+    name="OpenHouse.DataLoader.PlanFilesAttempts",
+    unit="1",
+    description="Attempt count for the plan_files call.",
+)
 
 
 def _is_transient(exc: BaseException) -> bool:
@@ -67,9 +90,6 @@ def _retry(
     Retries on ``OSError`` (transient network/storage I/O failures),
     except ``HTTPError`` which is only retried for 5xx status codes.
     Uses exponential backoff with up to *max_attempts* total attempts.
-
-    Bumps *attempts_counter* once per attempt and records *duration_histogram*
-    once when the call ultimately returns or raises (wall-clock across retries).
     """
     overall_start = time.monotonic()
     try:
@@ -119,10 +139,7 @@ class DataLoaderContext:
 
     Args:
         execution_context: Dictionary of execution context information (e.g. tenant, environment)
-        metric_attributes: Optional attributes attached to every metric emitted by this loader
-            (e.g. ``{"Tenant": "team-a"}``).  Keys/values are passed through verbatim so
-            callers control naming.  Keep cardinality bounded — LinkedIn pre-agg expects
-            fewer than ~100 unique values per dimension.
+        metric_attributes: Attributes attached to every metric emitted by this loader.
         table_transformer: Transformation to apply to the table before loading (e.g. column masking)
         udf_registry: UDFs required for the table transformation
         jvm_config: JVM configuration for JNI-based storage access.  Currently only HDFS is supported
@@ -196,8 +213,8 @@ class OpenHouseDataLoader:
             lambda: self._catalog.load_table((self._table_id.database, self._table_id.table)),
             label=f"load_table {self._table_id}",
             max_attempts=self._max_attempts,
-            duration_histogram=instruments.load_table_duration,
-            attempts_counter=instruments.load_table_attempts,
+            duration_histogram=_load_table_duration,
+            attempts_counter=_load_table_attempts,
             attributes=build_attributes(self._table_id, self._context.metric_attributes),
         )
 
@@ -311,8 +328,8 @@ class OpenHouseDataLoader:
             lambda: scan.plan_files(),
             label=f"plan_files {self._table_id}",
             max_attempts=self._max_attempts,
-            duration_histogram=instruments.plan_files_duration,
-            attempts_counter=instruments.plan_files_attempts,
+            duration_histogram=_plan_files_duration,
+            attempts_counter=_plan_files_attempts,
             attributes=build_attributes(self._table_id, self._context.metric_attributes),
         )
 

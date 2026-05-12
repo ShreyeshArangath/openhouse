@@ -16,9 +16,8 @@ in :mod:`openhouse.dataloader.metrics.instruments` paired with the attribute
 helper :func:`openhouse.dataloader.metrics.attributes.build_attributes`.
 """
 
-METER_NAME = "openhouse.dataloader"
+METER_NAME = "OpenHouse.DataLoader"
 
-from openhouse.dataloader.metrics import instruments  # noqa: E402
 from openhouse.dataloader.metrics.attributes import build_attributes  # noqa: E402
 
-__all__ = ["METER_NAME", "build_attributes", "instruments"]
+__all__ = ["METER_NAME", "build_attributes"]

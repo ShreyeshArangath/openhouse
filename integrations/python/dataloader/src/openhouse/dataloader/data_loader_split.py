@@ -10,6 +10,7 @@ from types import MappingProxyType
 
 from datafusion import SessionConfig
 from datafusion.context import SessionContext
+from opentelemetry.metrics import get_meter
 from pyarrow import RecordBatch
 from pyiceberg.io.pyarrow import ArrowScan
 from pyiceberg.table import ArrivalOrder, FileScanTask
@@ -18,11 +19,64 @@ from openhouse.dataloader._jvm import apply_libhdfs_opts
 from openhouse.dataloader._table_scan_context import TableScanContext
 from openhouse.dataloader._timer import log_duration
 from openhouse.dataloader.filters import _quote_identifier
-from openhouse.dataloader.metrics import build_attributes, instruments
+from openhouse.dataloader.metrics import METER_NAME, build_attributes
 from openhouse.dataloader.table_identifier import TableIdentifier
 from openhouse.dataloader.udf_registry import NoOpRegistry, UDFRegistry
 
 logger = logging.getLogger(__name__)
+
+_meter = get_meter(METER_NAME)
+
+_split_duration = _meter.create_histogram(
+    name="OpenHouse.DataLoader.SplitTime",
+    unit="s",
+    description="Duration of a DataLoaderSplit iteration.",
+)
+_split_files = _meter.create_histogram(
+    name="OpenHouse.DataLoader.SplitFiles",
+    unit="1",
+    description="Files in a DataLoaderSplit.",
+)
+_split_rows = _meter.create_histogram(
+    name="OpenHouse.DataLoader.SplitRows",
+    unit="1",
+    description="Rows yielded by a DataLoaderSplit.",
+)
+_split_bytes = _meter.create_histogram(
+    name="OpenHouse.DataLoader.SplitBytes",
+    unit="By",
+    description="Bytes yielded by a DataLoaderSplit.",
+)
+_split_batches = _meter.create_histogram(
+    name="OpenHouse.DataLoader.SplitBatches",
+    unit="1",
+    description="RecordBatches yielded by a DataLoaderSplit.",
+)
+_split_errors = _meter.create_counter(
+    name="OpenHouse.DataLoader.SplitErrors",
+    unit="1",
+    description="Errors from a DataLoaderSplit iteration.",
+)
+_batch_duration = _meter.create_histogram(
+    name="OpenHouse.DataLoader.BatchTime",
+    unit="s",
+    description="Duration of a RecordBatch read.",
+)
+_batch_rows = _meter.create_histogram(
+    name="OpenHouse.DataLoader.BatchRows",
+    unit="1",
+    description="Rows in a RecordBatch.",
+)
+_batch_bytes = _meter.create_histogram(
+    name="OpenHouse.DataLoader.BatchBytes",
+    unit="By",
+    description="Bytes in a RecordBatch.",
+)
+_batch_errors = _meter.create_counter(
+    name="OpenHouse.DataLoader.BatchErrors",
+    unit="1",
+    description="Errors raised while reading a RecordBatch.",
+)
 
 
 def to_sql_identifier(table_id: TableIdentifier) -> str:
@@ -86,15 +140,15 @@ class _TimedBatchIter:
         except Exception:
             elapsed = time.monotonic() - start
             logger.warning("record_batch %s [%d] failed after %.3fs", self._split_id, self._idx, elapsed)
-            instruments.batch_errors.add(1, self._attributes)
+            _batch_errors.add(1, self._attributes)
             raise
         elapsed = time.monotonic() - start
         logger.info("record_batch %s [%d] in %.3fs", self._split_id, self._idx, elapsed)
         rows = batch.num_rows
         nbytes = batch.nbytes
-        instruments.batch_duration.record(elapsed, self._attributes)
-        instruments.batch_rows.record(rows, self._attributes)
-        instruments.batch_bytes.record(nbytes, self._attributes)
+        _batch_duration.record(elapsed, self._attributes)
+        _batch_rows.record(rows, self._attributes)
+        _batch_bytes.record(nbytes, self._attributes)
         self.total_rows += rows
         self.total_bytes += nbytes
         self.batch_count += 1
@@ -192,15 +246,15 @@ class DataLoaderSplit:
                 session = _create_transform_session(self._scan_context.table_id, self._udf_registry, self._batch_size)
                 yield from _timed_transform(chain([first], timed), split_id, session, self._apply_transform)
         except BaseException:
-            instruments.split_errors.add(1, attributes)
+            _split_errors.add(1, attributes)
             raise
         finally:
-            instruments.split_duration.record(time.monotonic() - split_start, attributes)
-            instruments.split_files.record(len(self._file_scan_tasks), attributes)
+            _split_duration.record(time.monotonic() - split_start, attributes)
+            _split_files.record(len(self._file_scan_tasks), attributes)
             if timed is not None:
-                instruments.split_rows.record(timed.total_rows, attributes)
-                instruments.split_bytes.record(timed.total_bytes, attributes)
-                instruments.split_batches.record(timed.batch_count, attributes)
+                _split_rows.record(timed.total_rows, attributes)
+                _split_bytes.record(timed.total_bytes, attributes)
+                _split_batches.record(timed.batch_count, attributes)
 
     def _apply_transform(self, session: SessionContext, batch: RecordBatch) -> Iterator[RecordBatch]:
         """Execute the transform SQL against a single RecordBatch."""

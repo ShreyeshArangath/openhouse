@@ -45,8 +45,7 @@ class TableScanContext:
         table_id: Identifier for the table being scanned
         row_filter: Row-level filter expression pushed down to the scan
         worker_jvm_args: JVM arguments applied when the JNI JVM is created in worker processes
-        metric_attributes: Caller-provided attributes (e.g. tenant, environment) attached
-            verbatim to every metric emitted while iterating splits.  Caller controls naming.
+        metric_attributes: Attributes attached to every metric emitted while iterating splits.
     """
 
     table_metadata: TableMetadata

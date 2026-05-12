@@ -24,16 +24,22 @@ from pyiceberg.table.sorting import UNSORTED_SORT_ORDER
 from pyiceberg.types import LongType, NestedField
 
 from openhouse.dataloader._table_scan_context import TableScanContext
-from openhouse.dataloader.data_loader import _retry
+from openhouse.dataloader.data_loader import (
+    _load_table_attempts,
+    _load_table_duration,
+    _plan_files_attempts,
+    _plan_files_duration,
+    _retry,
+)
 from openhouse.dataloader.data_loader_split import DataLoaderSplit
-from openhouse.dataloader.metrics import METER_NAME, build_attributes, instruments
+from openhouse.dataloader.metrics import METER_NAME, build_attributes
 from openhouse.dataloader.table_identifier import TableIdentifier
 
 # --- Meter / METER_NAME basics ---
 
 
 def test_meter_name_is_stable():
-    assert METER_NAME == "openhouse.dataloader"
+    assert METER_NAME == "OpenHouse.DataLoader"
 
 
 def test_get_meter_with_meter_name_returns_a_meter():
@@ -46,20 +52,20 @@ def test_get_meter_with_meter_name_returns_a_meter():
 def test_build_attributes_includes_database_table():
     table_id = TableIdentifier("db1", "tbl1")
     attrs = build_attributes(table_id, None)
-    assert attrs == {"openhouse.database": "db1", "openhouse.table": "tbl1"}
+    assert attrs == {"OpenHouse.Database": "db1", "OpenHouse.Table": "tbl1"}
 
 
 def test_build_attributes_merges_caller_provided_attributes_verbatim():
     table_id = TableIdentifier("db1", "tbl1")
-    attrs = build_attributes(table_id, {"tenant": "team-a", "env": "prod"})
-    assert attrs["tenant"] == "team-a"
-    assert attrs["env"] == "prod"
+    attrs = build_attributes(table_id, {"Tenant": "team-a", "Env": "prod"})
+    assert attrs["Tenant"] == "team-a"
+    assert attrs["Env"] == "prod"
 
 
 def test_build_attributes_caller_keys_override_builtins():
     table_id = TableIdentifier("db1", "tbl1")
-    attrs = build_attributes(table_id, {"openhouse.table": "override"})
-    assert attrs["openhouse.table"] == "override"
+    attrs = build_attributes(table_id, {"OpenHouse.Table": "override"})
+    assert attrs["OpenHouse.Table"] == "override"
 
 
 # --- InMemoryMetricReader harness ---
@@ -87,7 +93,13 @@ def metrics_reader() -> Iterator[InMemoryMetricReader]:
 
 
 def _data_points(reader: InMemoryMetricReader, metric_name: str) -> list:
-    """Collect and return all data points for *metric_name* across scopes."""
+    """Collect and return all data points for *metric_name* across scopes.
+
+    ``metric_name`` must be the lowercase form stored by the SDK — the
+    OpenTelemetry SDK lowercases instrument names at registration time
+    (``opentelemetry/sdk/metrics/_internal/instrument.py``), even though
+    the declared names are PascalCase.
+    """
     data = reader.get_metrics_data()
     points: list = []
     if data is None:
@@ -114,25 +126,25 @@ def test_retry_emits_one_attempt_and_one_duration_on_success(metrics_reader):
         lambda: "ok",
         label="load_table db.tbl",
         max_attempts=3,
-        duration_histogram=instruments.load_table_duration,
-        attempts_counter=instruments.load_table_attempts,
+        duration_histogram=_load_table_duration,
+        attempts_counter=_load_table_attempts,
         attributes=attrs,
     )
     assert result == "ok"
 
-    attempts = _data_points(metrics_reader, "openhouse.dataloader.load_table.attempts")
+    attempts = _data_points(metrics_reader, "openhouse.dataloader.loadtableattempts")
     assert len(attempts) == 1
     assert _attrs(attempts[0]) == attrs
     assert attempts[0].value == 1
 
-    durations = _data_points(metrics_reader, "openhouse.dataloader.load_table.duration")
+    durations = _data_points(metrics_reader, "openhouse.dataloader.loadtabletime")
     assert len(durations) == 1
     assert _attrs(durations[0]) == attrs
 
 
 def test_retry_counts_each_attempt_on_transient_then_success(metrics_reader):
     table_id = TableIdentifier("db", "tbl")
-    attrs = build_attributes(table_id, {"tenant": "t1"})
+    attrs = build_attributes(table_id, {"Tenant": "t1"})
     calls = {"n": 0}
 
     def fn():
@@ -145,19 +157,19 @@ def test_retry_counts_each_attempt_on_transient_then_success(metrics_reader):
         fn,
         label="plan_files db.tbl",
         max_attempts=3,
-        duration_histogram=instruments.plan_files_duration,
-        attempts_counter=instruments.plan_files_attempts,
+        duration_histogram=_plan_files_duration,
+        attempts_counter=_plan_files_attempts,
         attributes=attrs,
     )
     assert result == "ok"
     assert calls["n"] == 2
 
-    attempts = _data_points(metrics_reader, "openhouse.dataloader.plan_files.attempts")
+    attempts = _data_points(metrics_reader, "openhouse.dataloader.planfilesattempts")
     assert len(attempts) == 1
     assert attempts[0].value == 2
-    assert _attrs(attempts[0])["tenant"] == "t1"
+    assert _attrs(attempts[0])["Tenant"] == "t1"
 
-    durations = _data_points(metrics_reader, "openhouse.dataloader.plan_files.duration")
+    durations = _data_points(metrics_reader, "openhouse.dataloader.planfilestime")
     assert len(durations) == 1
 
 
@@ -176,16 +188,16 @@ def test_retry_permanent_failure_still_records_duration(metrics_reader):
             fn,
             label="load_table",
             max_attempts=3,
-            duration_histogram=instruments.load_table_duration,
-            attempts_counter=instruments.load_table_attempts,
+            duration_histogram=_load_table_duration,
+            attempts_counter=_load_table_attempts,
             attributes=attrs,
         )
 
-    attempts = _data_points(metrics_reader, "openhouse.dataloader.load_table.attempts")
+    attempts = _data_points(metrics_reader, "openhouse.dataloader.loadtableattempts")
     assert len(attempts) == 1
     assert attempts[0].value == 1
 
-    durations = _data_points(metrics_reader, "openhouse.dataloader.load_table.duration")
+    durations = _data_points(metrics_reader, "openhouse.dataloader.loadtabletime")
     assert len(durations) == 1
 
 
@@ -226,41 +238,41 @@ def _make_split(tmp_path, metric_attributes: dict | None = None) -> DataLoaderSp
 
 
 def test_split_emits_per_split_and_per_batch_metrics(tmp_path, metrics_reader):
-    split = _make_split(tmp_path, metric_attributes={"tenant": "t1"})
+    split = _make_split(tmp_path, metric_attributes={"Tenant": "t1"})
     batches = list(split)
     assert sum(b.num_rows for b in batches) == 3
 
     expected_attrs = {
-        "openhouse.database": "db",
-        "openhouse.table": "tbl",
-        "tenant": "t1",
+        "OpenHouse.Database": "db",
+        "OpenHouse.Table": "tbl",
+        "Tenant": "t1",
     }
 
-    split_duration = _data_points(metrics_reader, "openhouse.dataloader.split.duration")
+    split_duration = _data_points(metrics_reader, "openhouse.dataloader.splittime")
     assert len(split_duration) == 1
     assert _attrs(split_duration[0]) == expected_attrs
 
-    split_files = _data_points(metrics_reader, "openhouse.dataloader.split.files")
+    split_files = _data_points(metrics_reader, "openhouse.dataloader.splitfiles")
     assert len(split_files) == 1
     assert split_files[0].sum == 1
 
-    split_rows = _data_points(metrics_reader, "openhouse.dataloader.split.rows")
+    split_rows = _data_points(metrics_reader, "openhouse.dataloader.splitrows")
     assert len(split_rows) == 1
     assert split_rows[0].sum == 3
 
-    split_bytes = _data_points(metrics_reader, "openhouse.dataloader.split.bytes")
+    split_bytes = _data_points(metrics_reader, "openhouse.dataloader.splitbytes")
     assert len(split_bytes) == 1
     assert split_bytes[0].sum > 0
 
-    split_batches = _data_points(metrics_reader, "openhouse.dataloader.split.batches")
+    split_batches = _data_points(metrics_reader, "openhouse.dataloader.splitbatches")
     assert len(split_batches) == 1
     assert split_batches[0].sum >= 1
 
-    batch_duration = _data_points(metrics_reader, "openhouse.dataloader.batch.duration")
+    batch_duration = _data_points(metrics_reader, "openhouse.dataloader.batchtime")
     assert len(batch_duration) == 1
     assert _attrs(batch_duration[0]) == expected_attrs
 
-    batch_rows = _data_points(metrics_reader, "openhouse.dataloader.batch.rows")
+    batch_rows = _data_points(metrics_reader, "openhouse.dataloader.batchrows")
     assert len(batch_rows) == 1
     assert batch_rows[0].sum == 3
 
@@ -286,16 +298,16 @@ def test_batch_read_failure_bumps_error_counters(tmp_path, monkeypatch, metrics_
     with pytest.raises(_ReaderError):
         list(split)
 
-    batch_errors = _data_points(metrics_reader, "openhouse.dataloader.batch.errors")
+    batch_errors = _data_points(metrics_reader, "openhouse.dataloader.batcherrors")
     assert len(batch_errors) == 1
     assert batch_errors[0].value == 1
 
-    split_errors = _data_points(metrics_reader, "openhouse.dataloader.split.errors")
+    split_errors = _data_points(metrics_reader, "openhouse.dataloader.spliterrors")
     assert len(split_errors) == 1
     assert split_errors[0].value == 1
 
     # split.duration is still recorded on failure
-    split_duration = _data_points(metrics_reader, "openhouse.dataloader.split.duration")
+    split_duration = _data_points(metrics_reader, "openhouse.dataloader.splittime")
     assert len(split_duration) == 1
 
 
@@ -308,6 +320,6 @@ def test_table_scan_context_default_metric_attributes_is_empty(tmp_path):
 
 
 def test_table_scan_context_pickle_preserves_metric_attributes(tmp_path):
-    split = _make_split(tmp_path, metric_attributes={"tenant": "t1"})
+    split = _make_split(tmp_path, metric_attributes={"Tenant": "t1"})
     restored = pickle.loads(pickle.dumps(split._scan_context))
-    assert dict(restored.metric_attributes) == {"tenant": "t1"}
+    assert dict(restored.metric_attributes) == {"Tenant": "t1"}
