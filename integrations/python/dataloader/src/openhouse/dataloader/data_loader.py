@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from functools import cached_property
@@ -8,6 +9,7 @@ from itertools import islice
 from types import MappingProxyType
 from typing import TypeVar
 
+from opentelemetry.metrics import Counter, Histogram
 from pyiceberg.catalog import Catalog
 from pyiceberg.table import Table
 from pyiceberg.table.snapshots import Snapshot
@@ -27,6 +29,7 @@ from openhouse.dataloader.filters import (
     _to_pyiceberg,
     always_true,
 )
+from openhouse.dataloader.metrics import build_attributes, instruments
 from openhouse.dataloader.scan_optimizer import optimize_scan
 from openhouse.dataloader.table_identifier import TableIdentifier
 from openhouse.dataloader.table_transformer import TableTransformer
@@ -51,22 +54,37 @@ def _batched(iterable: Iterable[_T], n: int) -> Iterator[tuple[_T, ...]]:
         yield batch
 
 
-def _retry(fn: Callable[[], _T], label: str, max_attempts: int) -> _T:
-    """Call *fn* with retry logic, logging duration of each attempt.
+def _retry(
+    fn: Callable[[], _T],
+    label: str,
+    max_attempts: int,
+    duration_histogram: Histogram,
+    attempts_counter: Counter,
+    attributes: Mapping[str, str],
+) -> _T:
+    """Call *fn* with retry logic, logging and emitting metrics for each attempt.
 
     Retries on ``OSError`` (transient network/storage I/O failures),
     except ``HTTPError`` which is only retried for 5xx status codes.
     Uses exponential backoff with up to *max_attempts* total attempts.
+
+    Bumps *attempts_counter* once per attempt and records *duration_histogram*
+    once when the call ultimately returns or raises (wall-clock across retries).
     """
-    for attempt in Retrying(
-        retry=retry_if_exception(_is_transient),
-        stop=stop_after_attempt(max_attempts),
-        wait=wait_exponential(),
-        reraise=True,
-    ):
-        with attempt, log_duration(logger, "%s (attempt %d)", label, attempt.retry_state.attempt_number):
-            return fn()
-    raise AssertionError("unreachable")  # pragma: no cover
+    overall_start = time.monotonic()
+    try:
+        for attempt in Retrying(
+            retry=retry_if_exception(_is_transient),
+            stop=stop_after_attempt(max_attempts),
+            wait=wait_exponential(),
+            reraise=True,
+        ):
+            with attempt, log_duration(logger, "%s (attempt %d)", label, attempt.retry_state.attempt_number):
+                attempts_counter.add(1, attributes)
+                return fn()
+        raise AssertionError("unreachable")  # pragma: no cover
+    finally:
+        duration_histogram.record(time.monotonic() - overall_start, attributes)
 
 
 @dataclass(frozen=True)
@@ -173,6 +191,9 @@ class OpenHouseDataLoader:
             lambda: self._catalog.load_table((self._table_id.database, self._table_id.table)),
             label=f"load_table {self._table_id}",
             max_attempts=self._max_attempts,
+            duration_histogram=instruments.load_table_duration,
+            attempts_counter=instruments.load_table_attempts,
+            attributes=build_attributes(self._table_id, self._context.execution_context),
         )
 
     @property
@@ -276,12 +297,18 @@ class OpenHouseDataLoader:
             row_filter=row_filter,
             table_id=self._table_id,
             worker_jvm_args=self._context.jvm_config.worker_args if self._context.jvm_config else None,
+            execution_context=self._context.execution_context or {},
         )
 
         # plan_files() materializes all tasks at once (PyIceberg doesn't support streaming)
         # Manifests are read in parallel with one thread per manifest
         scan_tasks = _retry(
-            lambda: scan.plan_files(), label=f"plan_files {self._table_id}", max_attempts=self._max_attempts
+            lambda: scan.plan_files(),
+            label=f"plan_files {self._table_id}",
+            max_attempts=self._max_attempts,
+            duration_histogram=instruments.plan_files_duration,
+            attempts_counter=instruments.plan_files_attempts,
+            attributes=build_attributes(self._table_id, self._context.execution_context),
         )
 
         for chunk in _batched(scan_tasks, self._files_per_split):

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from types import MappingProxyType
 
 from pyiceberg.expressions import AlwaysTrue, BooleanExpression
 from pyiceberg.io import FileIO, load_file_io
@@ -8,6 +10,8 @@ from pyiceberg.schema import Schema
 from pyiceberg.table.metadata import TableMetadata
 
 from openhouse.dataloader.table_identifier import TableIdentifier
+
+_EMPTY_EXECUTION_CONTEXT: Mapping[str, str] = MappingProxyType({})
 
 
 def _unpickle_scan_context(
@@ -17,6 +21,7 @@ def _unpickle_scan_context(
     row_filter: BooleanExpression,
     table_id: TableIdentifier,
     worker_jvm_args: str | None = None,
+    execution_context: Mapping[str, str] | None = None,
 ) -> TableScanContext:
     return TableScanContext(
         table_metadata=table_metadata,
@@ -25,6 +30,7 @@ def _unpickle_scan_context(
         row_filter=row_filter,
         table_id=table_id,
         worker_jvm_args=worker_jvm_args,
+        execution_context=execution_context if execution_context is not None else _EMPTY_EXECUTION_CONTEXT,
     )
 
 
@@ -42,6 +48,8 @@ class TableScanContext:
         table_id: Identifier for the table being scanned
         row_filter: Row-level filter expression pushed down to the scan
         worker_jvm_args: JVM arguments applied when the JNI JVM is created in worker processes
+        execution_context: Caller-provided context (e.g. tenant, environment) attached as
+            attributes on metrics emitted while iterating splits.
     """
 
     table_metadata: TableMetadata
@@ -50,6 +58,7 @@ class TableScanContext:
     table_id: TableIdentifier
     row_filter: BooleanExpression = AlwaysTrue()
     worker_jvm_args: str | None = None
+    execution_context: Mapping[str, str] = field(default_factory=lambda: _EMPTY_EXECUTION_CONTEXT)
 
     def __reduce__(self) -> tuple:
         return (
@@ -61,5 +70,6 @@ class TableScanContext:
                 self.row_filter,
                 self.table_id,
                 self.worker_jvm_args,
+                dict(self.execution_context),
             ),
         )

@@ -18,6 +18,7 @@ from openhouse.dataloader._jvm import apply_libhdfs_opts
 from openhouse.dataloader._table_scan_context import TableScanContext
 from openhouse.dataloader._timer import log_duration
 from openhouse.dataloader.filters import _quote_identifier
+from openhouse.dataloader.metrics import build_attributes, instruments
 from openhouse.dataloader.table_identifier import TableIdentifier
 from openhouse.dataloader.udf_registry import NoOpRegistry, UDFRegistry
 
@@ -57,12 +58,21 @@ def _bind_batch_table(session: SessionContext, table_id: TableIdentifier, batch:
 
 
 class _TimedBatchIter:
-    """Wraps a RecordBatch iterator to log the wall-clock time of each ``next()`` call."""
+    """Wraps a RecordBatch iterator to log and emit metrics for each ``next()`` call."""
 
-    def __init__(self, inner: Iterator[RecordBatch], split_id: str) -> None:
+    def __init__(
+        self,
+        inner: Iterator[RecordBatch],
+        split_id: str,
+        attributes: Mapping[str, str],
+    ) -> None:
         self._inner = inner
         self._split_id = split_id
+        self._attributes = attributes
         self._idx = 0
+        self.total_rows = 0
+        self.total_bytes = 0
+        self.batch_count = 0
 
     def __iter__(self) -> _TimedBatchIter:
         return self
@@ -74,11 +84,20 @@ class _TimedBatchIter:
         except StopIteration:
             raise
         except Exception:
-            logger.warning(
-                "record_batch %s [%d] failed after %.3fs", self._split_id, self._idx, time.monotonic() - start
-            )
+            elapsed = time.monotonic() - start
+            logger.warning("record_batch %s [%d] failed after %.3fs", self._split_id, self._idx, elapsed)
+            instruments.batch_errors.add(1, self._attributes)
             raise
-        logger.info("record_batch %s [%d] in %.3fs", self._split_id, self._idx, time.monotonic() - start)
+        elapsed = time.monotonic() - start
+        logger.info("record_batch %s [%d] in %.3fs", self._split_id, self._idx, elapsed)
+        rows = batch.num_rows
+        nbytes = batch.nbytes
+        instruments.batch_duration.record(elapsed, self._attributes)
+        instruments.batch_rows.record(rows, self._attributes)
+        instruments.batch_bytes.record(nbytes, self._attributes)
+        self.total_rows += rows
+        self.total_bytes += nbytes
+        self.batch_count += 1
         self._idx += 1
         return batch
 
@@ -140,34 +159,48 @@ class DataLoaderSplit:
         ctx = self._scan_context
         if ctx.worker_jvm_args is not None:
             apply_libhdfs_opts(ctx.worker_jvm_args)
-        arrow_scan = ArrowScan(
-            table_metadata=ctx.table_metadata,
-            io=ctx.io,
-            projected_schema=ctx.projected_schema,
-            row_filter=ctx.row_filter,
-        )
-
-        split_id = self.id[:12]
-
-        with log_duration(logger, "setup_scan %s", split_id):
-            batches = arrow_scan.to_record_batches(
-                self._file_scan_tasks,
-                order=ArrivalOrder(concurrent_streams=len(self._file_scan_tasks), batch_size=self._batch_size),
+        attributes = build_attributes(ctx.table_id, ctx.execution_context)
+        split_start = time.monotonic()
+        timed: _TimedBatchIter | None = None
+        try:
+            arrow_scan = ArrowScan(
+                table_metadata=ctx.table_metadata,
+                io=ctx.io,
+                projected_schema=ctx.projected_schema,
+                row_filter=ctx.row_filter,
             )
 
-        timed = _TimedBatchIter(iter(batches), split_id)
+            split_id = self.id[:12]
 
-        if self._transform_sql is None:
-            yield from timed
-        else:
-            # Materialize the first batch before creating the transform session
-            # so that the HDFS JVM starts (and picks up worker_jvm_args) before
-            # any UDF registration code can trigger JNI.
-            first = next(timed, None)
-            if first is None:
-                return
-            session = _create_transform_session(self._scan_context.table_id, self._udf_registry, self._batch_size)
-            yield from _timed_transform(chain([first], timed), split_id, session, self._apply_transform)
+            with log_duration(logger, "setup_scan %s", split_id):
+                batches = arrow_scan.to_record_batches(
+                    self._file_scan_tasks,
+                    order=ArrivalOrder(concurrent_streams=len(self._file_scan_tasks), batch_size=self._batch_size),
+                )
+
+            timed = _TimedBatchIter(iter(batches), split_id, attributes)
+
+            if self._transform_sql is None:
+                yield from timed
+            else:
+                # Materialize the first batch before creating the transform session
+                # so that the HDFS JVM starts (and picks up worker_jvm_args) before
+                # any UDF registration code can trigger JNI.
+                first = next(timed, None)
+                if first is None:
+                    return
+                session = _create_transform_session(self._scan_context.table_id, self._udf_registry, self._batch_size)
+                yield from _timed_transform(chain([first], timed), split_id, session, self._apply_transform)
+        except BaseException:
+            instruments.split_errors.add(1, attributes)
+            raise
+        finally:
+            instruments.split_duration.record(time.monotonic() - split_start, attributes)
+            instruments.split_files.record(len(self._file_scan_tasks), attributes)
+            if timed is not None:
+                instruments.split_rows.record(timed.total_rows, attributes)
+                instruments.split_bytes.record(timed.total_bytes, attributes)
+                instruments.split_batches.record(timed.batch_count, attributes)
 
     def _apply_transform(self, session: SessionContext, batch: RecordBatch) -> Iterator[RecordBatch]:
         """Execute the transform SQL against a single RecordBatch."""
