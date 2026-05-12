@@ -49,17 +49,17 @@ def test_build_attributes_includes_database_table():
     assert attrs == {"openhouse.database": "db1", "openhouse.table": "tbl1"}
 
 
-def test_build_attributes_includes_branch_when_set():
-    table_id = TableIdentifier("db1", "tbl1", branch="release")
-    attrs = build_attributes(table_id, None)
-    assert attrs["openhouse.branch"] == "release"
-
-
-def test_build_attributes_namespaces_execution_context():
+def test_build_attributes_merges_caller_provided_attributes_verbatim():
     table_id = TableIdentifier("db1", "tbl1")
     attrs = build_attributes(table_id, {"tenant": "team-a", "env": "prod"})
-    assert attrs["openhouse.ctx.tenant"] == "team-a"
-    assert attrs["openhouse.ctx.env"] == "prod"
+    assert attrs["tenant"] == "team-a"
+    assert attrs["env"] == "prod"
+
+
+def test_build_attributes_caller_keys_override_builtins():
+    table_id = TableIdentifier("db1", "tbl1")
+    attrs = build_attributes(table_id, {"openhouse.table": "override"})
+    assert attrs["openhouse.table"] == "override"
 
 
 # --- InMemoryMetricReader harness ---
@@ -155,7 +155,7 @@ def test_retry_counts_each_attempt_on_transient_then_success(metrics_reader):
     attempts = _data_points(metrics_reader, "openhouse.dataloader.plan_files.attempts")
     assert len(attempts) == 1
     assert attempts[0].value == 2
-    assert _attrs(attempts[0])["openhouse.ctx.tenant"] == "t1"
+    assert _attrs(attempts[0])["tenant"] == "t1"
 
     durations = _data_points(metrics_reader, "openhouse.dataloader.plan_files.duration")
     assert len(durations) == 1
@@ -195,7 +195,7 @@ _SPLIT_SCHEMA = Schema(NestedField(field_id=1, name="id", field_type=LongType(),
 _SPLIT_TABLE_ID = TableIdentifier("db", "tbl")
 
 
-def _make_split(tmp_path, execution_context: dict | None = None) -> DataLoaderSplit:
+def _make_split(tmp_path, metric_attributes: dict | None = None) -> DataLoaderSplit:
     file_path = str(tmp_path / "data.parquet")
     table = pa.table({"id": pa.array([1, 2, 3], type=pa.int64())})
     fields = [field.with_metadata({b"PARQUET:field_id": str(i + 1).encode()}) for i, field in enumerate(table.schema)]
@@ -212,7 +212,7 @@ def _make_split(tmp_path, execution_context: dict | None = None) -> DataLoaderSp
         io=load_file_io(properties={}, location=file_path),
         projected_schema=_SPLIT_SCHEMA,
         table_id=_SPLIT_TABLE_ID,
-        execution_context=execution_context or {},
+        metric_attributes=metric_attributes or {},
     )
     data_file = DataFile.from_args(
         file_path=file_path,
@@ -226,14 +226,14 @@ def _make_split(tmp_path, execution_context: dict | None = None) -> DataLoaderSp
 
 
 def test_split_emits_per_split_and_per_batch_metrics(tmp_path, metrics_reader):
-    split = _make_split(tmp_path, execution_context={"tenant": "t1"})
+    split = _make_split(tmp_path, metric_attributes={"tenant": "t1"})
     batches = list(split)
     assert sum(b.num_rows for b in batches) == 3
 
     expected_attrs = {
         "openhouse.database": "db",
         "openhouse.table": "tbl",
-        "openhouse.ctx.tenant": "t1",
+        "tenant": "t1",
     }
 
     split_duration = _data_points(metrics_reader, "openhouse.dataloader.split.duration")
@@ -299,15 +299,15 @@ def test_batch_read_failure_bumps_error_counters(tmp_path, monkeypatch, metrics_
     assert len(split_duration) == 1
 
 
-# --- TableScanContext.execution_context ---
+# --- TableScanContext.metric_attributes ---
 
 
-def test_table_scan_context_default_execution_context_is_empty(tmp_path):
+def test_table_scan_context_default_metric_attributes_is_empty(tmp_path):
     split = _make_split(tmp_path)
-    assert dict(split._scan_context.execution_context) == {}
+    assert dict(split._scan_context.metric_attributes) == {}
 
 
-def test_table_scan_context_pickle_preserves_execution_context(tmp_path):
-    split = _make_split(tmp_path, execution_context={"tenant": "t1"})
+def test_table_scan_context_pickle_preserves_metric_attributes(tmp_path):
+    split = _make_split(tmp_path, metric_attributes={"tenant": "t1"})
     restored = pickle.loads(pickle.dumps(split._scan_context))
-    assert dict(restored.execution_context) == {"tenant": "t1"}
+    assert dict(restored.metric_attributes) == {"tenant": "t1"}

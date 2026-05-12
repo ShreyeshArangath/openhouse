@@ -159,7 +159,7 @@ class DataLoaderSplit:
         ctx = self._scan_context
         if ctx.worker_jvm_args is not None:
             apply_libhdfs_opts(ctx.worker_jvm_args)
-        attributes = build_attributes(ctx.table_id, ctx.execution_context)
+        attributes = build_attributes(ctx.table_id, ctx.metric_attributes)
         split_start = time.monotonic()
         timed: _TimedBatchIter | None = None
         try:

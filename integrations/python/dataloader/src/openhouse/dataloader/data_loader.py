@@ -119,6 +119,10 @@ class DataLoaderContext:
 
     Args:
         execution_context: Dictionary of execution context information (e.g. tenant, environment)
+        metric_attributes: Optional attributes attached to every metric emitted by this loader
+            (e.g. ``{"Tenant": "team-a"}``).  Keys/values are passed through verbatim so
+            callers control naming.  Keep cardinality bounded — LinkedIn pre-agg expects
+            fewer than ~100 unique values per dimension.
         table_transformer: Transformation to apply to the table before loading (e.g. column masking)
         udf_registry: UDFs required for the table transformation
         jvm_config: JVM configuration for JNI-based storage access.  Currently only HDFS is supported
@@ -126,6 +130,7 @@ class DataLoaderContext:
     """
 
     execution_context: Mapping[str, str] | None = None
+    metric_attributes: Mapping[str, str] | None = None
     table_transformer: TableTransformer | None = None
     udf_registry: UDFRegistry | None = None
     jvm_config: JvmConfig | None = None
@@ -193,7 +198,7 @@ class OpenHouseDataLoader:
             max_attempts=self._max_attempts,
             duration_histogram=instruments.load_table_duration,
             attempts_counter=instruments.load_table_attempts,
-            attributes=build_attributes(self._table_id, self._context.execution_context),
+            attributes=build_attributes(self._table_id, self._context.metric_attributes),
         )
 
     @property
@@ -297,7 +302,7 @@ class OpenHouseDataLoader:
             row_filter=row_filter,
             table_id=self._table_id,
             worker_jvm_args=self._context.jvm_config.worker_args if self._context.jvm_config else None,
-            execution_context=self._context.execution_context or {},
+            metric_attributes=self._context.metric_attributes or {},
         )
 
         # plan_files() materializes all tasks at once (PyIceberg doesn't support streaming)
@@ -308,7 +313,7 @@ class OpenHouseDataLoader:
             max_attempts=self._max_attempts,
             duration_histogram=instruments.plan_files_duration,
             attempts_counter=instruments.plan_files_attempts,
-            attributes=build_attributes(self._table_id, self._context.execution_context),
+            attributes=build_attributes(self._table_id, self._context.metric_attributes),
         )
 
         for chunk in _batched(scan_tasks, self._files_per_split):

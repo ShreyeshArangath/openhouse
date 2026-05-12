@@ -4,6 +4,13 @@ All instruments are bound to a single ``Meter`` obtained via ``get_meter(METER_N
 Call sites import the module-level objects rather than constructing their own so the
 instrument inventory stays in one place.
 
+Names use lowercase dotted form (``openhouse.dataloader.<phase>.<measurement>``) because
+the OSS OpenTelemetry SDK normalizes metric names to lowercase on export, which would
+otherwise turn the LinkedIn-spec PascalCase form into unreadable concatenated tokens
+(e.g. ``OpenHouse.DataLoader.LoadTableTime`` → ``openhouse.dataloader.loadtabletime``).
+The LinkedIn ``linkedin.opentelemetry`` wrapper preserves PascalCase via its registry,
+but this library depends only on ``opentelemetry-api`` so consumers can wire any SDK.
+
 When no SDK is configured, ``opentelemetry-api`` returns no-op instruments and the
 ``record``/``add`` calls are cheap.
 """
