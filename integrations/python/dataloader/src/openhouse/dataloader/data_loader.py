@@ -164,7 +164,7 @@ class OpenHouseDataLoader:
         self._max_attempts = max_attempts
         self._batch_size = batch_size
         self._files_per_split = files_per_split
-        self._id = str(uuid.uuid4())
+        self._id = f"dataloader-{uuid.uuid4()}"
 
         if self._context.jvm_config is not None and self._context.jvm_config.planner_args is not None:
             apply_libhdfs_opts(self._context.jvm_config.planner_args)

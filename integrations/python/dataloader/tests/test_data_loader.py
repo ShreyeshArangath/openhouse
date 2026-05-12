@@ -132,6 +132,7 @@ def test_id_is_unique_per_loader_instance(tmp_path):
     loader_b = OpenHouseDataLoader(catalog=catalog, database="db", table="tbl")
 
     assert isinstance(loader_a.id, str)
+    assert loader_a.id.startswith("dataloader-")
     assert loader_a.id == loader_a.id
     assert loader_a.id != loader_b.id
 
