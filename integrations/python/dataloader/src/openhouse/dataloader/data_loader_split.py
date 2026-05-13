@@ -30,52 +30,52 @@ _meter = get_meter(METER_NAME)
 _split_duration = _meter.create_histogram(
     name="OpenHouse.DataLoader.SplitTime",
     unit="s",
-    description="Duration of a DataLoaderSplit iteration.",
+    description="Time spent iterating a split.",
 )
 _split_files = _meter.create_histogram(
     name="OpenHouse.DataLoader.SplitFiles",
     unit="1",
-    description="Files in a DataLoaderSplit.",
+    description="Number of files in a split.",
 )
 _split_rows = _meter.create_histogram(
     name="OpenHouse.DataLoader.SplitRows",
     unit="1",
-    description="Rows yielded by a DataLoaderSplit.",
+    description="Rows yielded by a split.",
 )
 _split_bytes = _meter.create_histogram(
     name="OpenHouse.DataLoader.SplitBytes",
     unit="By",
-    description="Bytes yielded by a DataLoaderSplit.",
+    description="Bytes yielded by a split.",
 )
 _split_batches = _meter.create_histogram(
     name="OpenHouse.DataLoader.SplitBatches",
     unit="1",
-    description="RecordBatches yielded by a DataLoaderSplit.",
+    description="Record batches yielded by a split.",
 )
 _split_errors = _meter.create_counter(
     name="OpenHouse.DataLoader.SplitErrors",
     unit="1",
-    description="Errors from a DataLoaderSplit iteration.",
+    description="Errors raised while iterating a split.",
 )
 _batch_duration = _meter.create_histogram(
     name="OpenHouse.DataLoader.BatchTime",
     unit="s",
-    description="Duration of a RecordBatch read.",
+    description="Time spent reading a record batch.",
 )
 _batch_rows = _meter.create_histogram(
     name="OpenHouse.DataLoader.BatchRows",
     unit="1",
-    description="Rows in a RecordBatch.",
+    description="Rows in a record batch.",
 )
 _batch_bytes = _meter.create_histogram(
     name="OpenHouse.DataLoader.BatchBytes",
     unit="By",
-    description="Bytes in a RecordBatch.",
+    description="Bytes in a record batch.",
 )
 _batch_errors = _meter.create_counter(
     name="OpenHouse.DataLoader.BatchErrors",
     unit="1",
-    description="Errors raised while reading a RecordBatch.",
+    description="Errors raised while reading a record batch.",
 )
 
 

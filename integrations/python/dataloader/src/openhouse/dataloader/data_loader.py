@@ -42,22 +42,22 @@ _meter = get_meter(METER_NAME)
 _load_table_duration = _meter.create_histogram(
     name="OpenHouse.DataLoader.LoadTableTime",
     unit="s",
-    description="Duration of the load_table call.",
+    description="Time spent loading the Iceberg table from the catalog.",
 )
 _load_table_attempts = _meter.create_counter(
     name="OpenHouse.DataLoader.LoadTableAttempts",
     unit="1",
-    description="Attempt count for the load_table call.",
+    description="Number of attempts to load the Iceberg table from the catalog.",
 )
 _plan_files_duration = _meter.create_histogram(
     name="OpenHouse.DataLoader.PlanFilesTime",
     unit="s",
-    description="Duration of the plan_files call.",
+    description="Time spent planning which files to scan.",
 )
 _plan_files_attempts = _meter.create_counter(
     name="OpenHouse.DataLoader.PlanFilesAttempts",
     unit="1",
-    description="Attempt count for the plan_files call.",
+    description="Number of attempts to plan files for the scan.",
 )
 
 
