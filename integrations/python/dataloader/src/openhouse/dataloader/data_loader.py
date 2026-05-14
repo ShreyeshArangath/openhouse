@@ -140,7 +140,7 @@ class DataLoaderContext:
 
     Args:
         execution_context: Dictionary of execution context information (e.g. tenant, environment)
-        metric_attributes: Attributes attached to every metric emitted by this loader.
+        metric_attribute_keys: Keys from ``execution_context`` to attach as dimensions on emitted metrics.
         table_transformer: Transformation to apply to the table before loading (e.g. column masking)
         udf_registry: UDFs required for the table transformation
         jvm_config: JVM configuration for JNI-based storage access.  Currently only HDFS is supported
@@ -148,7 +148,7 @@ class DataLoaderContext:
     """
 
     execution_context: Mapping[str, str] | None = None
-    metric_attributes: Mapping[str, str] | None = None
+    metric_attribute_keys: Sequence[str] | None = None
     table_transformer: TableTransformer | None = None
     udf_registry: UDFRegistry | None = None
     jvm_config: JvmConfig | None = None
@@ -210,6 +210,14 @@ class OpenHouseDataLoader:
             apply_libhdfs_opts(self._context.jvm_config.planner_args)
 
     @cached_property
+    def _resolved_metric_attributes(self) -> Mapping[str, str]:
+        keys = self._context.metric_attribute_keys
+        if not keys:
+            return {}
+        execution_context = self._context.execution_context or {}
+        return {k: execution_context[k] for k in keys if k in execution_context}
+
+    @cached_property
     def _iceberg_table(self) -> Table:
         return _retry(
             lambda: self._catalog.load_table((self._table_id.database, self._table_id.table)),
@@ -217,7 +225,7 @@ class OpenHouseDataLoader:
             max_attempts=self._max_attempts,
             duration_histogram=_load_table_duration,
             attempts_counter=_load_table_attempts,
-            attributes=build_attributes(self._table_id, self._context.metric_attributes),
+            attributes=build_attributes(self._table_id, self._resolved_metric_attributes),
         )
 
     @property
@@ -326,7 +334,7 @@ class OpenHouseDataLoader:
             row_filter=row_filter,
             table_id=self._table_id,
             worker_jvm_args=self._context.jvm_config.worker_args if self._context.jvm_config else None,
-            metric_attributes=self._context.metric_attributes or {},
+            metric_attributes=self._resolved_metric_attributes,
         )
 
         # plan_files() materializes all tasks at once (PyIceberg doesn't support streaming)
@@ -337,7 +345,7 @@ class OpenHouseDataLoader:
             max_attempts=self._max_attempts,
             duration_histogram=_plan_files_duration,
             attempts_counter=_plan_files_attempts,
-            attributes=build_attributes(self._table_id, self._context.metric_attributes),
+            attributes=build_attributes(self._table_id, self._resolved_metric_attributes),
         )
 
         for chunk in _batched(scan_tasks, self._files_per_split):

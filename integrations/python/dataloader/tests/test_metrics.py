@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import pickle
 from collections.abc import Iterator
+from unittest.mock import MagicMock
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -23,6 +24,7 @@ from pyiceberg.table.metadata import new_table_metadata
 from pyiceberg.table.sorting import UNSORTED_SORT_ORDER
 from pyiceberg.types import LongType, NestedField
 
+from openhouse.dataloader import DataLoaderContext, OpenHouseDataLoader
 from openhouse.dataloader._table_scan_context import TableScanContext
 from openhouse.dataloader.data_loader import (
     _load_table_attempts,
@@ -66,6 +68,43 @@ def test_build_attributes_caller_keys_override_builtins():
     table_id = TableIdentifier("db1", "tbl1")
     attrs = build_attributes(table_id, {"OpenHouse.Table": "override"})
     assert attrs["OpenHouse.Table"] == "override"
+
+
+# --- DataLoaderContext.metric_attribute_keys resolution ---
+
+
+def _loader(context: DataLoaderContext) -> OpenHouseDataLoader:
+    return OpenHouseDataLoader(catalog=MagicMock(), database="db", table="tbl", context=context)
+
+
+def test_resolved_metric_attributes_picks_whitelisted_keys():
+    loader = _loader(
+        DataLoaderContext(
+            execution_context={"tenant": "t1", "env": "prod", "user_id": "u-42"},
+            metric_attribute_keys=["tenant", "env"],
+        )
+    )
+    assert dict(loader._resolved_metric_attributes) == {"tenant": "t1", "env": "prod"}
+
+
+def test_resolved_metric_attributes_skips_missing_keys():
+    loader = _loader(
+        DataLoaderContext(
+            execution_context={"tenant": "t1"},
+            metric_attribute_keys=["tenant", "env"],
+        )
+    )
+    assert dict(loader._resolved_metric_attributes) == {"tenant": "t1"}
+
+
+def test_resolved_metric_attributes_empty_when_no_keys_configured():
+    loader = _loader(DataLoaderContext(execution_context={"tenant": "t1"}))
+    assert dict(loader._resolved_metric_attributes) == {}
+
+
+def test_resolved_metric_attributes_empty_when_execution_context_missing():
+    loader = _loader(DataLoaderContext(metric_attribute_keys=["tenant"]))
+    assert dict(loader._resolved_metric_attributes) == {}
 
 
 # --- InMemoryMetricReader harness ---
