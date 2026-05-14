@@ -34,7 +34,7 @@ from openhouse.dataloader.data_loader import (
     _retry,
 )
 from openhouse.dataloader.data_loader_split import DataLoaderSplit
-from openhouse.dataloader.metrics import METER_NAME, build_attributes
+from openhouse.dataloader.metrics import METER_NAME
 from openhouse.dataloader.table_identifier import TableIdentifier
 
 # --- Meter / METER_NAME basics ---
@@ -48,33 +48,19 @@ def test_get_meter_with_meter_name_returns_a_meter():
     assert isinstance(get_meter(METER_NAME), Meter)
 
 
-# --- build_attributes ---
-
-
-def test_build_attributes_includes_database_table():
-    table_id = TableIdentifier("db1", "tbl1")
-    attrs = build_attributes(table_id, None)
-    assert attrs == {"OpenHouse.Database": "db1", "OpenHouse.Table": "tbl1"}
-
-
-def test_build_attributes_merges_caller_provided_attributes_verbatim():
-    table_id = TableIdentifier("db1", "tbl1")
-    attrs = build_attributes(table_id, {"Tenant": "team-a", "Env": "prod"})
-    assert attrs["Tenant"] == "team-a"
-    assert attrs["Env"] == "prod"
-
-
-def test_build_attributes_caller_keys_override_builtins():
-    table_id = TableIdentifier("db1", "tbl1")
-    attrs = build_attributes(table_id, {"OpenHouse.Table": "override"})
-    assert attrs["OpenHouse.Table"] == "override"
-
-
 # --- DataLoaderContext.metric_attribute_keys resolution ---
 
 
 def _loader(context: DataLoaderContext) -> OpenHouseDataLoader:
     return OpenHouseDataLoader(catalog=MagicMock(), database="db", table="tbl", context=context)
+
+
+_BASE_ATTRS = {"OpenHouse.Database": "db", "OpenHouse.Table": "tbl"}
+
+
+def test_resolved_metric_attributes_includes_table_identifier_only_by_default():
+    loader = _loader(DataLoaderContext())
+    assert dict(loader._resolved_metric_attributes) == _BASE_ATTRS
 
 
 def test_resolved_metric_attributes_picks_whitelisted_keys():
@@ -84,7 +70,7 @@ def test_resolved_metric_attributes_picks_whitelisted_keys():
             metric_attribute_keys=["tenant", "env"],
         )
     )
-    assert dict(loader._resolved_metric_attributes) == {"tenant": "t1", "env": "prod"}
+    assert dict(loader._resolved_metric_attributes) == {**_BASE_ATTRS, "tenant": "t1", "env": "prod"}
 
 
 def test_resolved_metric_attributes_skips_missing_keys():
@@ -94,17 +80,17 @@ def test_resolved_metric_attributes_skips_missing_keys():
             metric_attribute_keys=["tenant", "env"],
         )
     )
-    assert dict(loader._resolved_metric_attributes) == {"tenant": "t1"}
+    assert dict(loader._resolved_metric_attributes) == {**_BASE_ATTRS, "tenant": "t1"}
 
 
-def test_resolved_metric_attributes_empty_when_no_keys_configured():
+def test_resolved_metric_attributes_no_extras_when_no_keys_configured():
     loader = _loader(DataLoaderContext(execution_context={"tenant": "t1"}))
-    assert dict(loader._resolved_metric_attributes) == {}
+    assert dict(loader._resolved_metric_attributes) == _BASE_ATTRS
 
 
-def test_resolved_metric_attributes_empty_when_execution_context_missing():
+def test_resolved_metric_attributes_no_extras_when_execution_context_missing():
     loader = _loader(DataLoaderContext(metric_attribute_keys=["tenant"]))
-    assert dict(loader._resolved_metric_attributes) == {}
+    assert dict(loader._resolved_metric_attributes) == _BASE_ATTRS
 
 
 # --- InMemoryMetricReader harness ---
@@ -159,8 +145,7 @@ def _attrs(point) -> dict:
 
 
 def test_retry_emits_one_attempt_and_one_duration_on_success(metrics_reader):
-    table_id = TableIdentifier("db", "tbl")
-    attrs = build_attributes(table_id, None)
+    attrs = {"OpenHouse.Database": "db", "OpenHouse.Table": "tbl"}
     result = _retry(
         lambda: "ok",
         label="load_table db.tbl",
@@ -182,8 +167,7 @@ def test_retry_emits_one_attempt_and_one_duration_on_success(metrics_reader):
 
 
 def test_retry_counts_each_attempt_on_transient_then_success(metrics_reader):
-    table_id = TableIdentifier("db", "tbl")
-    attrs = build_attributes(table_id, {"Tenant": "t1"})
+    attrs = {"OpenHouse.Database": "db", "OpenHouse.Table": "tbl", "Tenant": "t1"}
     calls = {"n": 0}
 
     def fn():
@@ -213,8 +197,7 @@ def test_retry_counts_each_attempt_on_transient_then_success(metrics_reader):
 
 
 def test_retry_permanent_failure_still_records_duration(metrics_reader):
-    table_id = TableIdentifier("db", "tbl")
-    attrs = build_attributes(table_id, None)
+    attrs = {"OpenHouse.Database": "db", "OpenHouse.Table": "tbl"}
 
     class _NonTransient(Exception):
         pass
@@ -277,15 +260,10 @@ def _make_split(tmp_path, metric_attributes: dict | None = None) -> DataLoaderSp
 
 
 def test_split_emits_per_split_and_per_batch_metrics(tmp_path, metrics_reader):
-    split = _make_split(tmp_path, metric_attributes={"Tenant": "t1"})
+    expected_attrs = {**_BASE_ATTRS, "Tenant": "t1"}
+    split = _make_split(tmp_path, metric_attributes=expected_attrs)
     batches = list(split)
     assert sum(b.num_rows for b in batches) == 3
-
-    expected_attrs = {
-        "OpenHouse.Database": "db",
-        "OpenHouse.Table": "tbl",
-        "Tenant": "t1",
-    }
 
     split_duration = _data_points(metrics_reader, "openhouse.dataloader.splittime")
     assert len(split_duration) == 1

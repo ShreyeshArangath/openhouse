@@ -14,6 +14,4 @@ Call sites should obtain a ``Meter`` via the OTEL API directly::
 
 METER_NAME = "OpenHouse.DataLoader"
 
-from openhouse.dataloader.metrics.attributes import build_attributes  # noqa: E402
-
-__all__ = ["METER_NAME", "build_attributes"]
+__all__ = ["METER_NAME"]

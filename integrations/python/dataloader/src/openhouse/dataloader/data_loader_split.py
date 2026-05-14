@@ -19,7 +19,7 @@ from openhouse.dataloader._jvm import apply_libhdfs_opts
 from openhouse.dataloader._table_scan_context import TableScanContext
 from openhouse.dataloader._timer import log_duration
 from openhouse.dataloader.filters import _quote_identifier
-from openhouse.dataloader.metrics import METER_NAME, build_attributes
+from openhouse.dataloader.metrics import METER_NAME
 from openhouse.dataloader.table_identifier import TableIdentifier
 from openhouse.dataloader.udf_registry import NoOpRegistry, UDFRegistry
 
@@ -213,7 +213,7 @@ class DataLoaderSplit:
         ctx = self._scan_context
         if ctx.worker_jvm_args is not None:
             apply_libhdfs_opts(ctx.worker_jvm_args)
-        attributes = build_attributes(ctx.table_id, ctx.metric_attributes)
+        attributes = ctx.metric_attributes
         split_start = time.monotonic()
         timed: _TimedBatchIter | None = None
         try:

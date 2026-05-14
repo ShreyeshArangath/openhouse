@@ -30,7 +30,7 @@ from openhouse.dataloader.filters import (
     _to_pyiceberg,
     always_true,
 )
-from openhouse.dataloader.metrics import METER_NAME, build_attributes
+from openhouse.dataloader.metrics import METER_NAME
 from openhouse.dataloader.scan_optimizer import optimize_scan
 from openhouse.dataloader.table_identifier import TableIdentifier
 from openhouse.dataloader.table_transformer import TableTransformer
@@ -211,11 +211,17 @@ class OpenHouseDataLoader:
 
     @cached_property
     def _resolved_metric_attributes(self) -> Mapping[str, str]:
+        attrs: dict[str, str] = {
+            "OpenHouse.Database": self._table_id.database,
+            "OpenHouse.Table": self._table_id.table,
+        }
         keys = self._context.metric_attribute_keys
-        if not keys:
-            return {}
-        execution_context = self._context.execution_context or {}
-        return {k: execution_context[k] for k in keys if k in execution_context}
+        if keys:
+            execution_context = self._context.execution_context or {}
+            for k in keys:
+                if k in execution_context:
+                    attrs[k] = execution_context[k]
+        return attrs
 
     @cached_property
     def _iceberg_table(self) -> Table:
@@ -225,7 +231,7 @@ class OpenHouseDataLoader:
             max_attempts=self._max_attempts,
             duration_histogram=_load_table_duration,
             attempts_counter=_load_table_attempts,
-            attributes=build_attributes(self._table_id, self._resolved_metric_attributes),
+            attributes=self._resolved_metric_attributes,
         )
 
     @property
@@ -345,7 +351,7 @@ class OpenHouseDataLoader:
             max_attempts=self._max_attempts,
             duration_histogram=_plan_files_duration,
             attempts_counter=_plan_files_attempts,
-            attributes=build_attributes(self._table_id, self._resolved_metric_attributes),
+            attributes=self._resolved_metric_attributes,
         )
 
         for chunk in _batched(scan_tasks, self._files_per_split):
