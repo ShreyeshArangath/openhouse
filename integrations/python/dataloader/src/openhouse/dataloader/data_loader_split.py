@@ -77,6 +77,11 @@ _batch_errors = _meter.create_counter(
     unit="1",
     description="Errors raised while reading a record batch.",
 )
+_transform_duration = _meter.create_histogram(
+    name="OpenHouse.DataLoader.TransformTime",
+    unit="s",
+    description="Time spent applying the transform to a record batch.",
+)
 
 
 def to_sql_identifier(table_id: TableIdentifier) -> str:
@@ -161,11 +166,16 @@ def _timed_transform(
     split_id: str,
     session: SessionContext,
     apply_fn: Callable[[SessionContext, RecordBatch], Iterator[RecordBatch]],
+    attributes: Mapping[str, str],
 ) -> Iterator[RecordBatch]:
-    """Apply a transform to each batch, logging the wall-clock time of each."""
+    """Apply a transform to each batch, logging and recording the wall-clock time of each."""
     for idx, batch in enumerate(batches):
-        with log_duration(logger, "transform_batch %s [%d]", split_id, idx):
-            transformed = list(apply_fn(session, batch))
+        transform_start = time.monotonic()
+        try:
+            with log_duration(logger, "transform_batch %s [%d]", split_id, idx):
+                transformed = list(apply_fn(session, batch))
+        finally:
+            _transform_duration.record(time.monotonic() - transform_start, attributes)
         yield from transformed
 
 
@@ -244,7 +254,7 @@ class DataLoaderSplit:
                 if first is None:
                     return
                 session = _create_transform_session(self._scan_context.table_id, self._udf_registry, self._batch_size)
-                yield from _timed_transform(chain([first], timed), split_id, session, self._apply_transform)
+                yield from _timed_transform(chain([first], timed), split_id, session, self._apply_transform, attributes)
         except BaseException:
             _split_errors.add(1, attributes)
             raise

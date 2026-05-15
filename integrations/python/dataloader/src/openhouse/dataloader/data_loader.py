@@ -45,20 +45,30 @@ _load_table_duration = _meter.create_histogram(
     unit="s",
     description="Time spent loading the Iceberg table from the catalog.",
 )
-_load_table_attempts = _meter.create_counter(
-    name="OpenHouse.DataLoader.LoadTableAttempts",
+_load_table_success = _meter.create_counter(
+    name="OpenHouse.DataLoader.LoadTableSuccess",
     unit="1",
-    description="Number of attempts to load the Iceberg table from the catalog.",
+    description="Successful loads of the Iceberg table from the catalog.",
+)
+_load_table_failure = _meter.create_counter(
+    name="OpenHouse.DataLoader.LoadTableFailure",
+    unit="1",
+    description="Failed loads of the Iceberg table from the catalog.",
 )
 _plan_files_duration = _meter.create_histogram(
     name="OpenHouse.DataLoader.PlanFilesTime",
     unit="s",
     description="Time spent planning which files to scan.",
 )
-_plan_files_attempts = _meter.create_counter(
-    name="OpenHouse.DataLoader.PlanFilesAttempts",
+_plan_files_success = _meter.create_counter(
+    name="OpenHouse.DataLoader.PlanFilesSuccess",
     unit="1",
-    description="Number of attempts to plan files for the scan.",
+    description="Successful file-planning operations for the scan.",
+)
+_plan_files_failure = _meter.create_counter(
+    name="OpenHouse.DataLoader.PlanFilesFailure",
+    unit="1",
+    description="Failed file-planning operations for the scan.",
 )
 
 
@@ -83,16 +93,18 @@ def _retry(
     label: str,
     max_attempts: int,
     duration_histogram: Histogram,
-    attempts_counter: Counter,
+    success_counter: Counter,
+    failure_counter: Counter,
     attributes: Mapping[str, str],
 ) -> _T:
-    """Call *fn* with retry logic, logging and emitting metrics for each attempt.
+    """Call *fn* with retry logic, logging the duration and recording the outcome.
 
     Retries on ``OSError`` (transient network/storage I/O failures),
     except ``HTTPError`` which is only retried for 5xx status codes.
     Uses exponential backoff with up to *max_attempts* total attempts.
     """
     overall_start = time.monotonic()
+    succeeded = False
     try:
         for attempt in Retrying(
             retry=retry_if_exception(_is_transient),
@@ -101,11 +113,13 @@ def _retry(
             reraise=True,
         ):
             with attempt, log_duration(logger, "%s (attempt %d)", label, attempt.retry_state.attempt_number):
-                attempts_counter.add(1, attributes)
-                return fn()
+                result = fn()
+                succeeded = True
+                return result
         raise AssertionError("unreachable")  # pragma: no cover
     finally:
         duration_histogram.record(time.monotonic() - overall_start, attributes)
+        (success_counter if succeeded else failure_counter).add(1, attributes)
 
 
 @dataclass(frozen=True)
@@ -230,7 +244,8 @@ class OpenHouseDataLoader:
             label=f"load_table {self._table_id}",
             max_attempts=self._max_attempts,
             duration_histogram=_load_table_duration,
-            attempts_counter=_load_table_attempts,
+            success_counter=_load_table_success,
+            failure_counter=_load_table_failure,
             attributes=self._resolved_metric_attributes,
         )
 
@@ -350,7 +365,8 @@ class OpenHouseDataLoader:
             label=f"plan_files {self._table_id}",
             max_attempts=self._max_attempts,
             duration_histogram=_plan_files_duration,
-            attempts_counter=_plan_files_attempts,
+            success_counter=_plan_files_success,
+            failure_counter=_plan_files_failure,
             attributes=self._resolved_metric_attributes,
         )
 
