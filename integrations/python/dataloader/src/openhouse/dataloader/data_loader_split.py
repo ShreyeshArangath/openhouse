@@ -100,8 +100,9 @@ def _create_transform_session(
     target schema exists.
     """
     config = SessionConfig()
-    if batch_size is not None:
-        config = config.set("datafusion.execution.batch_size", str(batch_size))
+    # TEST ONLY: hardcode the transform execution batch size to DataFusion's 8192 default,
+    # ignoring the passed-in batch_size, to A/B whether this affects the regressing job.
+    config = config.set("datafusion.execution.batch_size", "8192")
     session = SessionContext(config)
     udf_registry.register_udfs(session)
 
